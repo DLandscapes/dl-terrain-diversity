@@ -2,10 +2,9 @@
 # with ready-to-paste BibTeX — which is the difference between someone meaning
 # to cite the tool and actually doing it.
 #
-# ⚠️ ONE FIELD IS STILL OUTSTANDING: the DOI. It is OMITTED rather than carried
-#    as a placeholder, because a CITATION.cff with a dead DOI is worse than one
-#    with no DOI at all — see the note further down where it belongs.
-#    `repository-code` was filled on 2026-08-23, once the repository existed.
+# ✅ COMPLETE as of 2026-08-23. `repository-code` was filled once the repository
+#    existed; `doi` once Zenodo reserved one. Neither was ever committed as a
+#    placeholder — a CITATION.cff with a dead DOI is worse than one with none.
 cff-version: 1.2.0
 title: "DL-TerrainDiversity"
 message: "If you use this software, please cite it using these metadata."
@@ -51,12 +50,12 @@ repository-code: "https://github.com/DLandscapes/dl-terrain-diversity"
 url: "https://digital-landscapes.com/"
 version: "0.12.0"
 date-released: "2026-08-23"
-# doi: ADDED AT RELEASE TAGGING, NOT BEFORE. A CITATION.cff with a dead DOI is
-#      worse than none, so the field is OMITTED rather than carrying a
-#      placeholder. Reserve the DOI on Zenodo, paste it in as
-#        doi: "10.5281/zenodo.NNNNNNN"
-#      commit that, and only then tag v0.12.0 — so the archived snapshot
-#      correctly contains its own identifier.
+# ⚠️ THE VERSION DOI, RESERVED BEFORE THE DEPOSIT WAS PUBLISHED. That order is
+#    the whole point: reserving first meant this line could be committed and
+#    TAGGED, so the archive Zenodo keeps contains a citation file that knows
+#    its own identifier — rather than one describing a DOI minted after the
+#    fact, which is what the automatic GitHub integration would have produced.
+doi: "10.5281/zenodo.22067911"
 references:
   # ⚠️ THE METHOD'S OWN PRIOR PUBLICATION, AND THE DATE IS THE POINT. TDIM was
   # defined here, on Digital Landscapes' own site, on 23 April 2018 — under an
