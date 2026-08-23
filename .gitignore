@@ -1,0 +1,25 @@
+# Installed, never committed — the app itself vendors what it needs and has
+# no runtime dependency. This is only for the figure-rasterising dev tool.
+node_modules/
+
+# Instrument output. Everything here is DERIVED and reproducible by running
+# the tool; committing it would bloat the history and invite someone to edit
+# a PNG that a re-render then silently overwrites.
+*.zip
+
+# ⚠️ NEVER COMMIT THESE. The Kartverket DEM tiles ARE shipped (NLOD / CC BY
+# 4.0 permits it, with attribution). Orthophotography is different: licensed
+# education-and-research
+# only and may not be redistributed; site photographs are held back pending a
+# GDPR review. The patterns are here as a backstop, not as permission to put
+# them in the working tree.
+**/ortho*.tif
+**/ortho*.tiff
+**/*.aux.xml
+**/IMG_*.jpg
+**/IMG_*.jpeg
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+~$*

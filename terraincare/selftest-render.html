@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DL-TerrainDiversity — render self-test</title>
+<link rel="stylesheet" href="static/style.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "./static/vendor/three/three.module.min.js"
+  }
+}
+</script>
+<style>
+  /* Same document presentation as selftest.html, so the two suites read as one
+     pair. Theme tokens inherited unchanged. */
+  :root { --stage: #ffffff; }
+  body { display: block; height: auto; overflow: auto; padding: 28px 32px 60px; }
+  .wrap { max-width: 1080px; }
+  h1 { font-family: var(--font-head); font-size: 1.25rem; font-weight: 700; letter-spacing: .02em; }
+  p.sub { color: var(--ink-soft); font-size: .8rem; margin-top: 3px; max-width: 70ch; line-height: 1.5; }
+  #summary {
+    margin: 18px 0; padding: 12px 14px; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--sheet);
+    font-family: var(--font-head); font-size: .9rem;
+  }
+  #summary.ok { border-color: #2e6b3c; color: #1d5228; }
+  #summary.bad { border-color: #9a2b2b; color: #8a1f1f; }
+  h2.group {
+    font-family: var(--font-head); font-weight: 700; font-size: .78rem;
+    text-transform: uppercase; letter-spacing: .08em; color: var(--ink-soft);
+    margin: 22px 0 7px;
+  }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  td { padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; font-size: .78rem; }
+  td.res { width: 52px; font-family: var(--font-head); font-weight: 700; font-size: .72rem; }
+  td.check { line-height: 1.45; }
+  td.val { width: 230px; color: var(--ink-soft); font-size: .74rem; }
+  .pass { color: #1d5228; }
+  .fail { color: #8a1f1f; }
+  tr.failrow { background: #fdf3f2; }
+  /* The suite renders into this canvas. Kept on-page and small: a canvas the
+     browser considers invisible is allowed to skip compositing, and readPixels
+     against it has produced empty frames. */
+  #stage-wrap { margin-top: 22px; }
+  #stage-wrap canvas { width: 450px; height: 300px; border: 1px solid var(--line); border-radius: 6px; display: block; }
+  #stage-wrap figcaption { font-size: .72rem; color: var(--ink-soft); margin-top: 6px; font-family: var(--font-head); }
+  footer { margin-top: 34px; padding-top: 12px; border-top: 1px solid var(--line); color: var(--ink-soft); font-size: .74rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>DL-TerrainDiversity — render self-test</h1>
+  <p class="sub">Assertions about <em>pixels</em>, and about the geometry the GPU
+     actually receives. The kernel suite in
+     <a href="selftest.html">selftest.html</a> tests mathematics and runs
+     headless; every rendering defect this project has shipped was invisible to
+     it. Group R1 in particular exists because world UTM coordinates baked into
+     float32 vertex buffers quantise to 0.5 m at this site's northing, which
+     silently halved the terrain mesh's north–south resolution for three
+     phases. Each row states the property it defends.</p>
+
+  <div id="summary">Running…</div>
+  <div id="results"></div>
+
+  <figure id="stage-wrap">
+    <canvas id="canvas"></canvas>
+    <div id="overlay" hidden></div>
+    <figcaption>The suite's own viewport — last frame rendered.</figcaption>
+  </figure>
+
+  <footer>
+    Terrain data © Kartverket (hoydedata.no), NLOD / CC BY 4.0.
+    Ørndalen, northern Tromsøya — EPSG:25833, vertical datum NN2000.
+  </footer>
+</div>
+
+<script type="module">
+import { runRenderSuite } from "./static/selftest-render.js";
+
+const fetchTile = async (name) => {
+  const res = await fetch(`/data/orndalen/${name}`);
+  if (!res.ok) throw new Error(`could not fetch ${name}: ${res.status}`);
+  return res.arrayBuffer();
+};
+
+function renderRows(rows) {
+  const host = document.getElementById("results");
+  host.innerHTML = "";
+  let group = null, table = null;
+  for (const r of rows) {
+    if (r.group !== group) {
+      group = r.group;
+      const h = document.createElement("h2");
+      h.className = "group";
+      h.textContent = group;
+      host.appendChild(h);
+      table = document.createElement("table");
+      host.appendChild(table);
+    }
+    const tr = document.createElement("tr");
+    if (!r.pass) tr.className = "failrow";
+    tr.innerHTML =
+      `<td class="res ${r.pass ? "pass" : "fail"}">${r.pass ? "PASS" : "FAIL"}</td>` +
+      `<td class="check">${r.check}</td>` +
+      `<td class="val">expected ${r.expected}<br>measured <b>${r.measured}</b></td>`;
+    table.appendChild(tr);
+  }
+}
+
+try {
+  const rows = await runRenderSuite(
+    fetchTile,
+    document.getElementById("canvas"),
+    document.getElementById("overlay"),
+  );
+  renderRows(rows);
+  const failed = rows.filter((r) => !r.pass).length;
+  const el = document.getElementById("summary");
+  el.textContent = failed
+    ? `${failed} of ${rows.length} render checks FAILED`
+    : `All ${rows.length} render checks passed`;
+  el.className = failed ? "bad" : "ok";
+  window.__rendertest = { rows, failed, total: rows.length };
+} catch (err) {
+  const el = document.getElementById("summary");
+  el.textContent = `Error: ${err.message}`;
+  el.className = "bad";
+  window.__rendertest = { error: err.message };
+  console.error(err);
+}
+</script>
+</body>
+</html>

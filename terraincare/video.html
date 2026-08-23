@@ -1,0 +1,46 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>DL-TerrainDiversity — offline film render</title>
+<!-- ⚠️ SERVED BY tools/capture-server.py, NOT BY launcher.py. The page POSTs
+     every frame to /frame, which the app's own server does not accept, and
+     downloads are blocked in the Browser pane so the page cannot save them
+     itself. Run: python tools/capture-server.py -->
+<style>
+  body { margin: 0; background: #14130f; color: #e8e4da;
+         font: 13px/1.5 "Source Sans 3", system-ui, sans-serif; }
+  #wrap { display: flex; gap: 12px; padding: 12px; align-items: flex-start; }
+  #stage { width: 640px; height: 360px; background: #fdfcf9; }
+  #overlay { position: absolute; inset: 0; pointer-events: none; }
+  #side { flex: 1; min-width: 0; }
+  pre { background: #1d1c17; padding: 8px; height: 300px; overflow: auto;
+        white-space: pre-wrap; font-size: 12px; }
+  button { font: inherit; padding: 6px 12px; margin-right: 8px; }
+</style>
+<div id="wrap">
+  <div style="position:relative">
+    <canvas id="stage"></canvas><div id="overlay"></div>
+  </div>
+  <div id="side">
+    <button id="go">render 45 s</button>
+    <button id="probe">probe — 12 frames, no write</button>
+    <pre id="log">ready.</pre>
+  </div>
+</div>
+<script type="importmap">
+{ "imports": { "three": "./static/vendor/three/three.module.min.js" } }
+</script>
+<script type="module">
+import { renderFilm } from "./static/video.js";
+const el = document.getElementById("log");
+const log = (m) => { el.textContent += "\n" + m; el.scrollTop = el.scrollHeight; };
+window.__log = log;
+const run = async (opts) => {
+  el.textContent = "rendering…";
+  try { log(JSON.stringify(await renderFilm({ log, ...opts }))); }
+  catch (e) { log("ERROR: " + (e && e.stack || e)); }
+};
+document.getElementById("go").onclick = () => run({ width: 1920, height: 1080 });
+document.getElementById("probe").onclick =
+  () => run({ width: 960, height: 540, post: false, frames: 12 });
+window.__run = run;
+</script>

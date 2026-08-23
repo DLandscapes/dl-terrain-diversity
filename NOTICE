@@ -1,0 +1,131 @@
+DL-TerrainDiversity — a Terrain Design Information Model (TDIM)
+Copyright 2026 Digital Landscapes (Marc-Eduard Ihle)
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+this file except in compliance with the License. You may obtain a copy of the
+License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software distributed
+under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied. See the License for the
+specific language governing permissions and limitations under the License.
+
+===============================================================================
+THIRD-PARTY COMPONENTS REDISTRIBUTED IN THIS REPOSITORY
+===============================================================================
+
+This repository does not merely depend on the following — it CONTAINS them. Each
+licence text travels with its own files, at the path given, so the obligation is
+met by the copy you are holding rather than by a link that may rot.
+
+-------------------------------------------------------------------------------
+three.js
+    static/vendor/three/three.module.min.js
+    static/vendor/three/three.core.min.js
+    Licence: MIT — full text at static/vendor/three/LICENSE
+    Copyright (c) 2010-2025 three.js authors
+    https://threejs.org/
+
+    Used for the WebGL scene: the surface mesh, the camera, the overlays and the
+    offline render path. Vendored rather than fetched from a CDN so the tool runs
+    with no network, no build step and no installation — which is also what makes
+    a released copy reproducible years from now.
+
+-------------------------------------------------------------------------------
+Source Sans 3
+    static/fonts/SourceSans3-VariableFont_wght.ttf
+    Licence: SIL Open Font License 1.1 — full text at
+             static/fonts/OFL-SourceSans3.txt
+    Copyright 2010-2024 Adobe (http://www.adobe.com/), with Reserved Font Name
+    'Source'.
+    https://github.com/adobe-fonts/source-sans
+
+-------------------------------------------------------------------------------
+Quattrocento Sans
+    static/fonts/QuattrocentoSans-Regular.ttf
+    static/fonts/QuattrocentoSans-Bold.ttf
+    Licence: SIL Open Font License 1.1 — full text at static/fonts/OFL.txt
+    Copyright (c) 2011, Pablo Impallari, Rodrigo Fuenzalida, Brenda Gallo.
+    https://github.com/impallari/Quattrocento-Sans
+
+    ⚠️ THE OFL RESERVES FONT NAMES. If you modify either font family, the OFL
+    requires you to rename it. The fonts here are unmodified originals.
+
+-------------------------------------------------------------------------------
+@resvg/resvg-js — DEVELOPMENT DEPENDENCY ONLY, NOT REDISTRIBUTED
+    Declared in package.json devDependencies; used by tools/poster-png.mjs to
+    rasterise exported SVG figures. It is not vendored here and is not required
+    to run the instrument.
+
+===============================================================================
+DATA SHIPPED WITH THIS REPOSITORY
+===============================================================================
+
+data/teaching/flat75_025m.tif
+data/teaching/flat75_4m.tif
+
+    ⚠️ SYNTHETIC. NOT SURVEY DATA. NOT KARTVERKET. Every cell is exactly
+    75.000 m — a flat plane and nothing else. They exist so the instrument opens
+    without fetching anything, and so a workshop begins in the collapsed state
+    and has to earn its way out. They must never be described, exported or cited
+    as terrain data. See data/teaching/SOURCE.txt, which travels with them.
+
+    Their georeference IS real — EPSG:25833 (EUREF89 UTM33N), the Ørndalen
+    origins — because the biotic model is calibrated for Troms: the species
+    envelopes, solar geometry at 69.7 °N and the prevailing Tromsø south-wester
+    only mean anything at that location.
+
+data/orndalen/*.tif  —  TERRAIN DATA © KARTVERKET, NLOD / CC BY 4.0
+
+    ⚠️ ATTRIBUTION IS A LICENCE CONDITION, NOT A COURTESY. Anything derived from
+    these tiles — a figure, a drawing, an export, a slide — must credit
+    Kartverket. The instrument does this automatically wherever terrain is
+    shown, keyed on the tile name; if you rename the tiles, check that the
+    credit still appears.
+
+    Fetched 2026-07-30 from the hoydedata.no ArcGIS ImageServer, Tromsøya 10 pkt
+    2024 epoch (last flight 2024-08-07, 10 pt/m²), EPSG:25833 / NN2000. Full
+    provenance — bounding boxes, interpolation method, measured relief — travels
+    with them in data/orndalen/SOURCE.txt.
+
+    They are included because NLOD / CC BY 4.0 permits redistribution with
+    attribution, and because without them this repository could not run its own
+    547-check test suite or reproduce a single published figure. Roughly 1.1 MB
+    buys both.
+
+    ⚠️ NO ORTHOPHOTOGRAPHY IS INCLUDED, AND NONE MAY BE ADDED. The imagery used
+    during development (Norge i bilder / Kartverket) is licensed for EDUCATION
+    AND RESEARCH ONLY and may not be redistributed. static/ortho.js is present
+    because it is the READER, not the image.
+
+    ⚠️ NO SITE PHOTOGRAPHS ARE INCLUDED. They are held back pending a GDPR
+    review and are not part of this release.
+
+===============================================================================
+WHAT THIS SOFTWARE IS
+===============================================================================
+
+A terrain analysis instrument. NOT A PREDICTION. Where it names species it
+reports which ones the stated tolerances would suit, not which will establish.
+The vegetation model is a set of assumptions, not a measurement.
+
+The method — the Terrain Design Information Model — was defined by the author at
+the University of Innsbruck and published on 23 April 2018:
+https://digital-landscapes.com/2018/04/23/digital-terrain-design-information-model/
+
+⚠️ NOT A SUBSTITUTE FOR SURVEY OR ENGINEERING DESIGN. Cut and fill volumes,
+levels, batters and slope classes are for design exploration. Anything going to
+construction, tender or a regulatory submission needs an independent check by a
+qualified engineer or surveyor against a current survey. The tool computes
+faithfully on the surface it is given; it does not detect or correct error in
+that surface. The full disclaimer is in README.md, and the formal warranty
+disclaimer is sections 7 and 8 of LICENSE.
+
+DL-TerrainDiversity is developed and owned by Digital Landscapes, and is applied
+at UiT The Arctic University of Norway in landscape architecture teaching.
+
+Developed by Digital Landscapes with AI assistance. The Terrain Design
+Information Model, the design decisions and all verification are Digital
+Landscapes' own.

@@ -1,0 +1,2687 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DL-TerrainDiversity</title>
+<link rel="stylesheet" href="static/style.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "./static/vendor/three/three.module.min.js"
+  }
+}
+</script>
+<style>
+  /* The one token this app overrides. The shared theme sets --stage dark
+     because DL-3DGS renders splats, which read best against black. Terrain is
+     the opposite case: the surface is pale, the analysis ramps run light-to-
+     dark, and the whole thing ends up screen-captured for a printed-matter
+     context, so a white stage keeps the tool consistent with the paper palette
+     around it. style.css itself stays byte-identical to the sibling app.
+     view.js reads this value for the WebGL clear colour, so there is one
+     source of truth rather than a CSS colour and a hard-coded hex drifting
+     apart. */
+  :root { --stage: #ffffff; }
+
+  /* Phase 2 additions to the committed theme. Nothing here overrides a token;
+     these are layout rules for parts the sibling apps do not have. */
+  #metrics { display: flex; flex-direction: column; gap: 5px; }
+  .metric {
+    display: flex; align-items: baseline; justify-content: space-between;
+    font-size: .8rem; gap: 8px;
+  }
+  .metric span { color: var(--ink-soft); }
+  .metric b {
+    font-family: var(--font-head); font-weight: 700;
+    font-variant-numeric: tabular-nums; color: var(--ink);
+  }
+  /* The biotic readouts are a different KIND of number from the ones above
+     them — measured terrain versus an assumed response to it — so they are
+     ruled off rather than merged into the same list. */
+  .metric.sep { border-top: 1px solid var(--line); padding-top: 6px; margin-top: 2px; }
+
+  /* The water-body diagram. A fixed backing store drawn in device pixels and
+     laid out fluid, so the axis text stays sharp on a 2x display — see
+     drawWaterChart(). The border is the same hairline the analysis thumbnails
+     wear, because it is the same kind of object: a small picture of a
+     measurement, not a control. */
+  #w-chart {
+    width: 100%; height: auto; display: block; margin-top: 6px;
+    border: 1px solid var(--line); border-radius: 5px; background: var(--sheet);
+  }
+  #w-chart-row { margin-top: 8px; }
+  /* The class picker: a wrapping row of small latching chips, not a column of
+     checkboxes — ten landform classes as a stacked list would be taller than
+     the panel that holds them. */
+  #rule-class-list { flex-wrap: wrap; gap: 3px; }
+  #rule-class-list button {
+    font-size: .7rem; padding: 2px 6px; border: 1px solid var(--line);
+    border-radius: 4px; background: var(--sheet); cursor: pointer;
+  }
+  #sym-legend {
+    width: 100%; height: auto; display: block; margin-top: 6px;
+    border: 1px solid var(--line); border-radius: 5px; background: var(--sheet);
+  }
+
+  /* ---- Collapsible sections ----
+     The sidebar had grown to eleven permanently-open panels and finding a
+     control meant scrolling past every one of them. The sections are native
+     <details>, so collapse costs no script to work at all — the script in
+     sidebar.js only remembers, badges and auto-opens.
+
+     ⚠️ display:block ON PURPOSE, overriding .panel's flex. The flex column
+     moves to the inner .sec-body: a non-block display on <details> has a
+     history of leaking closed content in some engines, and block is the one
+     layout the element is specified to have. */
+  details.panel { display: block; }
+  /* ⚠️ EVERY TOP-LEVEL SECTION IS A VERB (Marc, 2026-08-19): Import, Display,
+     Select, Modify, Section, Export. The menu had been mixing registers —
+     Import and Export were verbs, "Selection" was a noun and "Terrain
+     Modifiers" named the instruments rather than the act — and reading the six
+     in a row made the seam obvious. Import and Export are fixed vocabulary in
+     every GIS and CAD this sits beside, so the verbs won and the nouns moved.
+     ⚠️ ONE LEVEL DOWN THE RULE INVERTS, AND ON PURPOSE. A section says what you
+     DO; the folds inside it name the THING you do it with — Brush, Terrace,
+     Curve, Pattern; Terrain, Orthophoto, Substrate. Only Select's three are
+     different again, because there the question really is HOW: by drawing, from
+     a file, by attribute. Three levels, three consistent grammars, and each one
+     answers a different question.
+     ⚠️ "View" BECAME "Display" rather than "Appearance": the panel carries
+     vertical exaggeration, which is a stated DISTORTION the section sheets have
+     to declare, and calling that an appearance would undersell it.
+     ⚠️ THE IDS DO NOT MOVE — `sec-where`, `sec-shape`, `sec-view`, `sec-stamp`
+     stay exactly as they are, the same rule `scoop`/`mound` kept when the
+     interface moved to CUT and FILL, and `bench` kept when it became Terrace.
+     Renaming a label is an interface decision; renaming an id is a refactor of
+     every test, every persisted fold and every handler that reads it. */
+
+  /* ⚠️ ONE ROW PER SECTION: ICON, TITLE, CHEVRON (Marc, 2026-08-19). The rail
+     and the panel headers were two controls naming the same six things, so the
+     menu said "Import" twice — once in the rail's label and once in the panel's
+     own <h2> a few pixels away. Merging them removes the duplication, removes a
+     whole column of chrome, and turns the menu back into what it actually is:
+     six things you can open, one at a time. The rail's icons moved in here;
+     the rail itself is gone. */
+  details.panel > summary {
+    display: flex; align-items: center; gap: 9px;
+    cursor: pointer; list-style: none; user-select: none;
+    padding: 5px 0;
+  }
+  details.panel > summary::-webkit-details-marker { display: none; }
+  /* The section's own glyph, on the left. Feather geometry at the weight the
+     website uses — see the note that travelled with these from the rail.
+     ⚠️ currentColor IS LOAD-BEARING: hover and open both change `color` only,
+     and the glyph follows. */
+  details.panel > summary > svg {
+    flex: none; width: 16px; height: 16px;
+    fill: none; stroke: currentColor; stroke-width: 2;
+    stroke-linecap: round; stroke-linejoin: round;
+    color: var(--ink-soft);
+  }
+  details.panel > summary > h2 { flex: 1; min-width: 0; }
+  /* ⚠️ THE CHEVRON IS ON THE RIGHT AND POINTS DOWN TO EXPAND. It was on the
+     left, where it competed with the icon for the same corner and read as a
+     bullet rather than as a control. On the right it is where every disclosure
+     control in every list has been for thirty years. */
+  details.panel > summary::after {
+    content: "▾"; font-family: var(--font-head); font-size: .72rem;
+    color: var(--ink-soft); flex: none; transition: transform .12s ease;
+    transform: rotate(-90deg);
+  }
+  details.panel[open] > summary::after { transform: rotate(0deg); }
+  details.panel[open] > summary > svg,
+  details.panel[open] > summary > h2 { color: var(--ink); }
+  details.panel > summary:hover h2,
+  details.panel > summary:hover > svg,
+  details.panel > summary:hover::after { color: var(--ink); }
+  .sec-body { display: flex; flex-direction: column; gap: 9px; margin-top: 9px; }
+
+  /* The badge: what is live inside a CLOSED section — an armed brush, plan
+     mode, standing rain. Hidden while the section is open, because then the
+     controls themselves are visible and a duplicate would only shout. A
+     collapsed section must never hide active state: a folded panel with the
+     Level brush still armed would paint on the next drag and look haunted. */
+  .sec-badge {
+    margin-left: auto; font-family: var(--font-head);
+    font-size: .66rem; color: var(--ink-soft);
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; max-width: 58%;
+  }
+  details.panel[open] > summary .sec-badge { display: none; }
+
+  /* ⚠️ THE RULE BELONGS TO THE TOP-LEVEL BOUNDARY, NOT TO THE SUB-PANEL
+     (2026-08-13, reported by Marc: "orthophoto and site photographs look like
+     being in the same menu as Selection"). It was exactly backwards: every
+     .subhead drew a full-width rule while `details.panel > summary` drew NONE,
+     so a sub-panel's divider was typographically identical to a panel
+     divider — and the last sub in a group ran straight into the next PANEL
+     with nothing between them. Three subs inside Site therefore read as three
+     more top-level sections. The rule now sits between top-level panels,
+     where the boundary actually is, and the subs are INDENTED instead, which
+     is the signal that says "inside" rather than "next". */
+  .subhead {
+    font-family: var(--font-head); font-weight: 700; font-size: .72rem;
+    text-transform: uppercase; letter-spacing: .08em; color: var(--ink-soft);
+    padding-top: 1px;
+  }
+  /* ⚠️ NO RULE BETWEEN PANELS ANY MORE — the rail replaced the accordion, so
+     exactly one panel is ever on screen and there is no boundary left to
+     draw. The rule stays defined for the one case that still stacks two:
+     a browser without :has() support, where the fallback shows them in a
+     column. */
+  #menu-main:not(:has(#tab-rail)) details.panel + details.panel {
+    border-top: 1px solid var(--line); padding-top: 11px; margin-top: 3px;
+  }
+
+  /* ══ THE READOUT WINDOW, RIGHT ═════════════════════════════════════════
+     Same chrome as the menu, deliberately — one window family, not two. It
+     hangs BELOW the fold button and the gizmo, which is why it is built
+     compact.
+     ⚠️ THE OFFSET IS MEASURED, NOT ASSUMED (Marc, 2026-08-19). It was a fixed
+     137px, which is where the gizmo ends only while it carries no section
+     buttons — cut one section and the gizmo grows a row, putting its
+     projection button UNDER this window (readout z 4, gizmo z 2). app.js sets
+     --readout-top from the gizmo's real bottom whenever the section list is
+     rebuilt; 137px stays as the value for a gizmo that has not been measured
+     yet. A dragged window is inline-positioned and never touched by this. */
+  #readout {
+    position: absolute; right: 12px; top: var(--readout-top, 137px); z-index: 4;
+    width: 264px; max-height: calc(100% - var(--readout-top, 137px) - 12px);
+    display: flex; flex-direction: column; gap: 10px; padding: 12px;
+    /* Same reservation as the menu — four panels that each toggle alone make
+       this window's height change constantly, and without the gutter its own
+       contents would shuffle sideways every time one was opened. */
+    overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable;
+    border: 1px solid var(--line); border-radius: 5px;
+    background: rgba(255,255,255,.94);
+    box-shadow: 0 2px 10px rgba(0,0,0,.10);
+  }
+  #readout.min { display: none; }
+  /* The disclaimer line. Quiet enough that it is not competing with a reading,
+     present enough that it is never absent from the window the readings are in.
+     It underlines on hover because it opens something — a line that explains
+     itself on hover and gives no sign of it is a control nobody finds. */
+  #readout-disclaimer {
+    flex: none; margin-top: 6px; padding-top: 6px;
+    border-top: 1px solid var(--line, #ddd8cf);
+    font-size: 10px; line-height: 1.35; color: var(--ink-soft, #7a766d);
+    cursor: help;
+  }
+  #readout-disclaimer:hover { color: var(--ink, #26241f); text-decoration: underline dotted; }
+  #readout-head { display: flex; align-items: center; gap: 8px; cursor: grab; user-select: none; }
+  #readout.dragging #readout-head { cursor: grabbing; }
+  #readout-head h2 {
+    font-family: var(--font-head); font-weight: 700; font-size: .78rem;
+    letter-spacing: .1em; text-transform: uppercase; color: var(--ink-soft);
+  }
+  #readout-min { margin-left: auto; flex: none; }
+  #readout-main { display: flex; align-items: flex-start; gap: 9px; }
+  #readout-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+  #readout-rail { flex: none; display: flex; flex-direction: column; gap: 3px; position: sticky; top: 0; }
+  /* ⚠️ A SQUARE FRAME, GENEROUSLY ROUNDED, WITH THE GLYPH CENTRED IN IT (Marc,
+     2026-08-19, against a reference). Three things were wrong: the button was
+     30 x 26, so the frame was a slightly squashed rectangle and any centred
+     glyph read as off-centre vertically; the radius of 4 px was tight enough to
+     read as a box rather than as a mark; and the icon was not centred at all
+     (see the note on the svg rule below). Square at 30 x 30 with a 9 px radius
+     gives the frame the same proportion in both axes, so centring is
+     believable, and the softer corner matches the fillets now used on the
+     exported figures. */
+  #readout-rail button {
+    width: 30px; height: 30px; padding: 0; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--font-head); font-size: .62rem; font-weight: 700;
+    letter-spacing: .04em; color: var(--ink-soft);
+    border: 1px solid var(--line); border-radius: 9px; background: var(--sheet);
+  }
+  #readout-rail button:hover { color: #000; border-color: #4a4a4a; }
+  #readout-rail button.on { background: var(--ink); border-color: var(--ink); color: var(--sheet); }
+  /* ⚠️ MEASURED IS NEVER BEHIND A TAB. Its rail button still highlights so the
+     rail tells the truth about what is showing, but the panel itself is open
+     whatever else is — it is the account watched while working. */
+  details.rpanel { display: block; }
+  details.rpanel > summary { list-style: none; cursor: pointer; user-select: none; }
+  details.rpanel > summary::-webkit-details-marker { display: none; }
+  /* ⚠️ `summary.subhead` IS COVERED TOO, because Rainfall and Species arrive
+     here as promoted sub-folds and keep their original summary markup — their
+     heading is bare text, not an <h2>. Without this they would draw at the
+     nested size inside a panel that no longer exists. */
+  details.rpanel > summary h2,
+  details.rpanel > summary.subhead {
+    font-family: var(--font-head); font-weight: 700; font-size: .72rem;
+    letter-spacing: .08em; text-transform: uppercase; color: var(--ink-soft);
+    padding-bottom: 4px; border-bottom: 1px solid var(--line);
+    display: block; padding-top: 0; margin: 0;
+  }
+  details.rpanel > summary:hover h2,
+  details.rpanel > summary.subhead:hover { color: var(--ink); }
+  /* Promoted panels lose the nested indent and spine they carried as subs. */
+  details.rpanel { padding-left: 0; border-left: none; margin-left: 0; }
+  /* The drag handle, with a grip so it can be found. */
+  #readout-head { min-height: 10px; justify-content: center; }
+  #readout-head .grip {
+    width: 26px; height: 0;
+    border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+    padding-top: 3px;
+  }
+  /* The ledger heads the Measured panel — the headline figure, set larger. */
+  #numbers-body > #ledger { margin-bottom: 2px; }
+  details.rpanel > .sec-body { margin-top: 8px; }
+  #readout-chip {
+    position: absolute; right: 12px; top: 137px; z-index: 4;
+    box-sizing: border-box; width: 30px; height: 26px;
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--font-head); font-size: .74rem; line-height: 1;
+    padding: 0; cursor: pointer; border-radius: 4px;
+    background: #4a4a4a; border: 1px solid #4a4a4a; color: #fff;
+  }
+  #readout-chip:hover { background: #000; border-color: #000; }
+
+  /* ══ THE TAB RAIL ══════════════════════════════════════════════════════ */
+  #menu-main { display: flex; align-items: flex-start; gap: 11px; }
+  #menu-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+  #tab-rail {
+    flex: none; display: flex; flex-direction: column; gap: 3px;
+    position: sticky; top: 0;   /* the map must not scroll away from the list */
+  }
+  /* ⚠️ THE RAIL CARRIES ITS TITLES (Marc, 2026-08-19). An icon reminds someone
+     who already knows; the words are what teach the first time — and with the
+     menu now booting with NOTHING expanded, the rail is the whole interface at
+     first sight, so it has to say what it opens. The tooltip sentence stays as
+     the long form. */
+  #tab-rail button {
+    min-width: 30px; height: 26px; padding: 0 7px 0 6px; cursor: pointer;
+    display: flex; align-items: center; gap: 6px; text-align: left;
+    font-family: var(--font-head); font-size: .62rem; font-weight: 700;
+    letter-spacing: .04em; color: var(--ink-soft);
+    border: 1px solid var(--line); border-radius: 4px; background: var(--sheet);
+    position: relative;
+  }
+  /* ⚠️ THE WEBSITE'S OWN ICON CONVENTION, matched exactly: a 24 grid, no fill,
+     stroke in currentColor at width 2, round caps and joins. Sized to 16 px in
+     a 30 x 26 button, which lands the drawn weight at about 1.3 px — the same
+     optical weight the site's 24 px icons carry at stroke 2.
+     ⚠️ currentColor IS LOAD-BEARING: the active tab only changes `color`, and
+     the glyph inverts to white with it. A hard-coded stroke would leave the
+     selected tab drawing dark ink on dark ink. */
+  #tab-rail button span {
+    font-family: var(--font-head); font-size: .62rem; font-weight: 700;
+    letter-spacing: .04em; text-transform: uppercase; white-space: nowrap;
+  }
+  /* The readout rail stays icon-only: its four are readings a designer turns on
+     and off constantly, and it sits against the right edge where a label column
+     would eat the stage rather than the menu. */
+  /* ⚠️ THE ICONS WENT OFF-CENTRE WHEN THE TAB RAIL LEARNED LABELS. That rule
+     was shared, and making the tab-rail buttons flex meant its glyphs no longer
+     wanted `margin: auto` — so it became `margin: 0`. The readout rail's
+     buttons are NOT flex, so their icons lost their centring and sat top-left
+     in the frame. The tab rail has since been merged into the panel headers and
+     is gone; this rule now serves the readout rail alone, and centres. */
+  #readout-rail button svg {
+    display: block; margin: auto; width: 17px; height: 17px;
+    fill: none; stroke: currentColor; stroke-width: 1.8;
+    stroke-linecap: round; stroke-linejoin: round;
+  }
+  #tab-rail button:hover { color: #000; border-color: #4a4a4a; }
+  #tab-rail button.on {
+    background: var(--ink); border-color: var(--ink); color: var(--sheet);
+  }
+  /* ⚠️ THE BADGE BECAME A DOT, and it had to. The old badge printed live state
+     in the header of a CLOSED panel — but with the rail there are no closed
+     headers to print into, and losing it would let an armed brush or standing
+     rain go unannounced, which is the exact failure the badge was built to
+     prevent. The full text moves to the button's tooltip; the dot is the
+     at-a-glance half. */
+  /* ⚠️ IN THE CORNER, NOT ON THE GLYPH. A 16 px icon centred in a 30 x 26
+     button leaves 7 px of margin at the sides and 5 px top and bottom; the dot
+     sat at 3,3 and overlapped the glyph's own top-right, so it read as part of
+     the drawing — "why is there a dot inside the icons?". At 1.5 px with a
+     3.5 px dot it finishes above the glyph's top edge and reads as a mark ON
+     the button instead. */
+  /* ⚠️ THE LIVE DOT FOLLOWED THE ICON OUT OF THE RAIL. It means "armed or
+     running, and you could forget it" — an armed brush, a standing rain — and
+     losing it when the rail went would let exactly that state go unannounced.
+     It sits ON the section's glyph rather than at the row's edge, where the
+     chevron now lives. */
+  details.panel > summary { position: relative; }
+  details.panel.live > summary > svg { color: var(--ink); }
+  details.panel.live > summary::before {
+    content: ""; position: absolute; left: 11px; top: 3px;
+    width: 4px; height: 4px; border-radius: 50%; background: var(--ink);
+  }
+  /* One visible title: the open panel's own summary. The closed panels keep
+     theirs in the DOM (sidebar.js and the badge machinery read it) and simply
+     do not draw it. */
+  /* ⚠️ A CLOSED PANEL TAKES NO SPACE AT ALL — not merely no visible content
+     (2026-08-13). Hiding just the summary left the <details> itself in the
+     flex column, and `#menu-body`'s 14 px gap still applied to every one of
+     them: the open panel's title was pushed down 14 px for each CLOSED panel
+     above it in the DOM. Measured before the fix — Site 0, Selection 14,
+     Modifiers 28, Section 42, View 56, Export 70 — so the heading walked down
+     the window as you moved along the rail, and only the first tab lined up
+     with its icon. `display: none` removes the box, the gap goes with it, and
+     every panel's title starts level with the top of the rail.
+     ⚠️ Safe for the badge machinery: sidebar.js reads classes and child
+     counts, never geometry, and its `shown()` helper tests the `hidden`
+     property rather than computed display. */
+  /* ⚠️ AND THAT RULE IS NOW REVERSED (2026-08-19), because the thing it was
+     serving is gone. Hiding closed panels outright was correct WHILE the rail
+     existed: the rail was the navigation, so a closed panel was redundant
+     chrome whose 14 px gap walked the open panel's title down the window. With
+     the titles merged into the panel headers, those headers ARE the navigation
+     — hiding them would leave a menu you cannot navigate. The gap problem it
+     fixed does not return, because every row is now visible by design and they
+     sit in one even column. */
+  details.panel[open] > summary { cursor: default; }
+  /* Nested, and it reads as nested: an indent plus a hairline spine down the
+     group. Cheaper than a box and it survives the panel being dragged. */
+  details.sub {
+    padding-left: 9px; border-left: 1px solid var(--line); margin-left: 1px;
+  }
+  /* A subhead that is also a fold — same voice, plus the sections' caret. */
+  details.sub { display: block; }
+  details.sub > summary.subhead { cursor: pointer; list-style: none; user-select: none; }
+  details.sub > summary.subhead::-webkit-details-marker { display: none; }
+  details.sub > summary.subhead::before {
+    content: "▸ "; font-size: .68rem; color: var(--ink-soft);
+  }
+  details.sub[open] > summary.subhead::before { content: "▾ "; }
+  details.sub > summary.subhead:hover { color: var(--ink); }
+  details.sub > .sec-body { margin-top: 9px; }
+
+  /* Substrate: its own drop target, its own class palette. Kept visually
+     quieter than the terrain dropzone because it is an optional input. */
+  #soil-dropzone, #pat-dropzone, #ortho-dropzone, #photo-dropzone {
+    display: flex; flex-direction: column; gap: 2px; align-items: center;
+    padding: 10px 8px; text-align: center; cursor: pointer;
+    border: 1px dashed var(--line); border-radius: 5px;
+    font-size: .72rem; color: var(--ink-soft); transition: border-color .12s;
+  }
+  #soil-dropzone strong, #pat-dropzone strong,
+  #ortho-dropzone strong, #photo-dropzone strong {
+    font-family: var(--font-head); color: var(--ink); font-size: .76rem;
+  }
+  #soil-dropzone:hover, #soil-dropzone.dragover,
+  #pat-dropzone:hover, #pat-dropzone.dragover,
+  #ortho-dropzone:hover, #ortho-dropzone.dragover,
+  #photo-dropzone:hover, #photo-dropzone.dragover { border-color: var(--ink); color: var(--ink); }
+
+  /* The photograph itself, shown when a row in the list is clicked. Click it
+     to dismiss — it is a look, not a mode. */
+  #photo-view {
+    position: absolute; right: 16px; bottom: 84px; z-index: 6;
+    max-width: 38vw; cursor: pointer;
+    background: rgba(255,255,255,.96); border: 1px solid var(--line);
+    border-radius: 5px; padding: 6px; box-shadow: 0 2px 12px rgba(0,0,0,.16);
+  }
+  #photo-view img { display: block; max-width: 100%; max-height: 46vh; border-radius: 3px; }
+  #photo-view .meta { margin-top: 5px; font-size: .72rem; }
+
+  /* The mini preview that follows the pointer over a pin. Inert — see the
+     note in app.js: a thumbnail that swallowed the click would block the full
+     view it exists to advertise. */
+  #photo-tip {
+    position: fixed; z-index: 7; width: 190px; pointer-events: none;
+    padding: 5px; background: rgba(255,255,255,.96);
+    border: 1px solid var(--line); border-radius: 5px;
+    box-shadow: 0 2px 10px rgba(0,0,0,.14);
+  }
+  #photo-tip img { display: block; width: 100%; border-radius: 3px; }
+  /* The row whose pin is currently black on the model, so list and viewport
+     answer the question "which one am I looking at?" the same way. */
+  #photo-list li.on { border-color: #000; }
+  #photo-list li.on .grow { font-weight: 700; color: #000; }
+  #photo-tip span {
+    display: block; margin-top: 4px;
+    font-family: var(--font-head); font-size: .64rem; color: var(--ink-soft);
+  }
+
+  /* The loaded pattern, shown at the size it will be stamped at. A drawing is
+     the one input to this tool that a number cannot describe, so it has to be
+     visible — and it is drawn through the SAME amplitude and bias the stamp
+     will use, so the thumbnail is a preview of the operation rather than a
+     picture of the file. */
+  #pat-thumb {
+    display: block; width: 100%; height: auto; aspect-ratio: 1;
+    border: 1px solid var(--line); border-radius: 4px; image-rendering: pixelated;
+  }
+  /* The pattern picker. A GRID OF THUMBNAILS, not a dropdown: these are shapes,
+     and a list of twelve names asks the reader to remember what each one looks
+     like. Each cell is the pattern drawn through the same cut/fill ramp the
+     stamp preview uses, so the picker shows earthwork rather than texture. */
+  .picker {
+    width: 100%; text-align: left;
+    font-family: var(--font-head); font-size: .74rem;
+  }
+  #pat-library {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px;
+    padding: 6px; border: 1px solid var(--line); border-radius: 5px;
+    background: var(--sheet);
+  }
+  #pat-library figure { margin: 0; cursor: pointer; }
+  #pat-library canvas {
+    display: block; width: 100%; height: auto; aspect-ratio: 1;
+    border: 1px solid var(--line); border-radius: 3px; image-rendering: pixelated;
+  }
+  #pat-library figcaption {
+    font-size: .6rem; line-height: 1.25; color: var(--ink-soft);
+    margin-top: 2px; text-align: center;
+  }
+  #pat-library figure:hover canvas { border-color: var(--ink-soft); }
+  #pat-library figure:hover figcaption { color: var(--ink); }
+  #pat-library figure.on canvas { border-color: var(--ink); border-width: 2px; }
+  #pat-library figure.on figcaption { color: var(--ink); font-weight: 700; }
+
+  /* A hidden region stays in the list — it is still part of the design and it
+     still exports — but the row says so, or "hide all" would look like delete. */
+  .list li.hidden-region .grow, .list li.hidden-region .val { opacity: .45; }
+  .list li.hidden-region .grow { text-decoration: line-through; }
+
+  /* The preview is also the way into the picker — see togglePatternLibrary.
+     It has to say so: an image that does something on click and looks like an
+     image is a control nobody finds. Hovering names the action rather than
+     merely highlighting, because "click me" and "click me to change the
+     pattern" are different promises. */
+  #pat-thumb-wrap { position: relative; cursor: pointer; }
+  #pat-thumb-wrap:hover #pat-thumb { border-color: var(--ink); }
+  #pat-thumb-wrap span {
+    position: absolute; left: 5px; bottom: 5px;
+    padding: 0 4px; border-radius: 2px; background: rgba(255,255,255,.8);
+    font-family: var(--font-head); font-size: .62rem; color: var(--ink-soft);
+  }
+  #pat-thumb-wrap::after {
+    content: "click to choose from twelve ▾";
+    position: absolute; left: 5px; top: 5px;
+    padding: 1px 5px; border-radius: 2px;
+    background: rgba(255,255,255,.86); border: 1px solid var(--line);
+    font-family: var(--font-head); font-size: .62rem; color: var(--ink-soft);
+    opacity: 0; transition: opacity .12s;
+  }
+  #pat-thumb-wrap:hover::after { opacity: 1; }
+
+  #soil-classes { display: flex; flex-wrap: wrap; gap: 4px; }
+  .swatch {
+    display: flex; align-items: center; gap: 5px;
+    padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px;
+    background: var(--sheet); cursor: pointer; white-space: nowrap;
+    font-family: var(--font-head); font-size: .68rem; color: var(--ink-soft);
+  }
+  .swatch i {
+    width: 10px; height: 10px; flex: none;
+    border-radius: 2px; border: 1px solid rgba(0,0,0,.15);
+  }
+  .swatch b { font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .swatch:hover { border-color: var(--ink-soft); color: var(--ink); }
+  .swatch.on { border-color: var(--ink); color: var(--ink); font-weight: 700; }
+
+  /* The trait table. On screen because these envelopes are the tool's only
+     unmeasured input, and a reader has to be able to disagree with them. */
+  #trait-table { display: flex; flex-direction: column; gap: 5px; }
+  .trait {
+    display: grid; grid-template-columns: 10px 1fr auto; gap: 7px;
+    align-items: baseline; font-size: .72rem; line-height: 1.35;
+  }
+  .trait i {
+    width: 10px; height: 10px; border-radius: 2px; align-self: center;
+    border: 1px solid rgba(0,0,0,.15);
+  }
+  .trait .sp { color: var(--ink); }
+  .trait .sp em { font-style: italic; }
+  .trait .sp small { display: block; color: var(--ink-soft); font-size: .92em; }
+  .trait b {
+    font-family: var(--font-head); font-variant-numeric: tabular-nums;
+    color: var(--ink-soft); font-weight: 400;
+  }
+  .trait.on b { color: var(--ink); font-weight: 700; }
+  /* The invasive is called what it is, in the table and in the legend. */
+  .trait .flag {
+    display: inline-block; margin-left: 4px; padding: 0 3px;
+    border: 1px solid var(--ink-soft); border-radius: 2px;
+    font-family: var(--font-head); font-size: .82em; color: var(--ink-soft);
+    letter-spacing: .04em;
+  }
+  .teaching {
+    border: 1px solid var(--line); border-left: 3px solid var(--ink-soft);
+    border-radius: 5px; padding: 8px 10px;
+    font-size: .74rem; line-height: 1.45; color: var(--ink-soft);
+  }
+  /* ⚠️ EXPLANATIONS ARE A MODE, NOT A HOVER (2026-08-13, Marc: "some info
+     texts take a lot of space"). Measured with only Site open: 870 px of prose
+     in a 694 px window — more than a screenful before any control is reached.
+     Hover-reveal was the obvious fix and is the wrong one here: this tool is
+     used in a workshop and screen-recorded, hover text cannot be read on a
+     touch screen, never appears in a recording, and cannot be pointed at while
+     talking. One switch instead, persisted, so the same build serves the
+     teaching case and the expert case. ⚠️ `.meta.keys` is EXEMPT — those are
+     the keyboard bindings for a mode you are standing in, not an explanation,
+     and a user who hides prose still needs to know what Backspace does. */
+  #sidebar.lean .teaching,
+  #sidebar.lean .meta:not(.keys) { display: none; }
+  #explain {
+    margin-left: auto; flex: none; font-family: var(--font-head);
+    font-size: .62rem; letter-spacing: .06em; text-transform: uppercase;
+    padding: 2px 6px; cursor: pointer; color: var(--ink-soft);
+    border: 1px solid var(--line); border-radius: 4px; background: var(--sheet);
+  }
+  #explain:hover { color: #000; border-color: #4a4a4a; }
+  #explain.on { background: var(--ink); border-color: var(--ink); color: var(--sheet); }
+  /* The experiment's table — Phase 8E's console table, drawn by the tool.
+     Right-aligned tabular numerals; the patch scheme's figure is the bold one,
+     matching the design document's own typography. */
+  #bench-compare-out { display: flex; flex-direction: column; gap: 6px; }
+  #bench-compare-out table {
+    width: 100%; border-collapse: collapse;
+    font-size: .68rem; font-variant-numeric: tabular-nums;
+  }
+  #bench-compare-out th {
+    font-family: var(--font-head); font-weight: 400; color: var(--ink-soft);
+    text-align: right; padding: 2px 3px; border-bottom: 1px solid var(--line);
+    letter-spacing: .02em;
+  }
+  #bench-compare-out td {
+    text-align: right; padding: 2px 3px; color: var(--ink-soft);
+    border-bottom: 1px solid var(--line); white-space: nowrap;
+  }
+  #bench-compare-out th:first-child, #bench-compare-out td:first-child { text-align: left; }
+  #bench-compare-out td b { color: var(--ink); font-weight: 700; }
+  #bench-compare-out .base { font-size: .7rem; color: var(--ink-soft); }
+  #bench-compare-out .base b { color: var(--ink); }
+  /* Axis gizmo, top right — the Blender convention, where a named view is one
+     click and always parallel-projected, because a "top view" that still
+     converges is not a plan. */
+  /* ⚠️ CLEAR OF THE FOLD BUTTON. That button occupies 8..34 px from the top, so
+     a gizmo at 34 touched it exactly — no gap at all, and the two read as one
+     control block. 46 gives the same 12 px the window margins use. */
+  #gizmo {
+    position: absolute; right: 12px; top: 46px;
+    display: flex; flex-direction: column; gap: 4px; z-index: 2;
+  }
+  #gizmo .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; }
+  /* Sections are a variable-length list, not a fixed 2x3 of axes, so they wrap
+     rather than forcing three columns — two sections should not leave a hole. */
+  #gizmo .grid.sections { display: flex; flex-wrap: wrap; justify-content: flex-end; }
+  #gizmo .grid.sections button { flex: 0 0 auto; padding-left: 5px; padding-right: 5px; }
+  #gizmo button {
+    font-family: var(--font-head); font-size: .66rem; letter-spacing: .04em;
+    padding: 4px 0; min-width: 38px; cursor: pointer;
+    border: 1px solid var(--line); border-radius: 4px;
+    background: rgba(255,255,255,.82); color: var(--ink-soft);
+  }
+  #gizmo button:hover { color: var(--ink); border-color: var(--ink-soft); }
+  #gizmo button.on { background: var(--ink); border-color: var(--ink); color: var(--sheet); }
+  #gizmo .proj { width: 100%; }
+
+  /* ⚠️ THE FOLD CONTROL OWNS THE TOP-RIGHT CORNER, AND FPS STEPS LEFT OF IT
+     (2026-08-13, Marc's call). It used to live in the menu's own header, which
+     put it — and therefore the chip it folds to, which lands on its exact rect
+     — around x 282, y 61: the middle-left of the viewport, floating over the
+     terrain. Folding the menu for a clean recording frame left the one control
+     you need to unfold it sitting in the shot. In the corner, above the gizmo,
+     it is out of the picture and in the place every window in every system
+     keeps its close control. FPS moves left to make room, since it was
+     occupying the corner for a diagnostic. */
+  #fps {
+    position: absolute; right: 48px; top: 12px;
+    font-family: var(--font-head); font-size: .72rem;
+    color: var(--ink-soft); font-variant-numeric: tabular-nums;
+    pointer-events: none; z-index: 2;
+  }
+
+  /* Brandmark, lower right — same element as DL-TerrainSlicer's, so the DL
+     tools sign their viewports identically. Lives in this style block rather
+     than style.css because the shared theme stays byte-identical across the
+     sibling apps. Achromatic like the rest of the chrome; it brightens on
+     hover only because it is a link. */
+  /* Instrument mode. Pointer-events off throughout: the overlay is a readout,
+     and one that swallowed a brush stroke would be a readout that broke the
+     tool it reports on. */
+  #hud {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    pointer-events: none; z-index: 2;
+  }
+  /* ══ ONE MODE (decided 2026-08-11) ═══════════════════════════════════════
+     There is no longer a sidebar column, an instrument mode that hides it, or
+     a dock that receives its controls. The viewport fills the window always;
+     the menu is a FLOATING WINDOW over it — draggable by its header, minimised
+     to a chip for a clean recording frame — and the Instrument button toggles
+     only what it always really was: the readout cards. Plan mode remains a
+     camera-and-palette state inside the one mode. These overrides live here
+     because style.css stays byte-identical across the sibling apps. */
+  body { display: block; }
+  #viewport { position: absolute; inset: 0; }
+  /* ⚠️ THE SCROLLBAR GUTTER IS RESERVED WHETHER OR NOT IT IS NEEDED
+     (2026-08-13, Marc: "the DL icon above jumps around"). Panels differ in
+     height, so switching tabs made the window overflow on some and not on
+     others — and the scrollbar appearing took 17 px out of the CONTENT width,
+     shifting everything in the window left by 15 px and back again. Measured
+     on the Export tab: the header's right edge moved 341 → 326 while every
+     other tab held at 341. Nothing was moving of its own accord; the box was
+     changing width under it. `scrollbar-gutter: stable` holds the space always,
+     so the layout is identical whether a panel scrolls or not. */
+  /* ⚠️ BACK TO style.css's OWN 330px (2026-08-19). It went to 400 to make room
+     for a titled rail beside the panels; with the titles now IN the panel
+     headers there is no rail and no column to make room for, so the override is
+     gone rather than left at a width nothing needs. */
+  #sidebar {
+    position: absolute; left: 12px; top: 12px; z-index: 4;
+    height: auto; max-height: calc(100% - 24px);
+    scrollbar-gutter: stable;
+    border: 1px solid var(--line); border-right: 1px solid var(--line);
+    border-radius: 5px; background: rgba(255,255,255,.94);
+    box-shadow: 0 2px 10px rgba(0,0,0,.10);
+  }
+  /* The header is the handle. */
+  #sidebar header { cursor: grab; user-select: none; }
+  #sidebar.dragging header { cursor: grabbing; }
+  #sidebar.min { display: none; }
+  /* ⚠️ ONE TOGGLE, ONE PLACE. The chip is positioned by sidebar.js onto the
+     exact rect the − button occupied, so folding and unfolding happen under
+     the same pixel. They therefore have to be the SAME SIZE — a chip wider
+     than the button it replaces would land its own edge under the cursor —
+     which is why both are 26x22 and share every other value. */
+  /* ⚠️ THE FOLD BUTTON LEFT THE MENU HEADER and now sits on the viewport, so
+     it no longer travels when the window is dragged — which is the point: a
+     control that hides the menu should not be somewhere the menu has moved to.
+     It is bigger and outlined more strongly than the old − because Marc asked
+     for it to be more obvious, and because at 26 x 22 in a header it read as
+     punctuation rather than as a control. */
+  #menu-min { position: absolute; right: 12px; top: 8px; z-index: 5; }
+  #menu-chip, #menu-min {
+    box-sizing: border-box; width: 30px; height: 26px;
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--font-head); font-size: .74rem; line-height: 1;
+    padding: 0; cursor: pointer;
+    border: 1px solid var(--line); border-radius: 4px;
+    color: var(--ink-soft);
+  }
+  /* Position only — the paper backgrounds these two used to carry are set by
+     the inverted rule below, which must win. */
+  /* The mark is a flex child now that it is wrapped in a link — block and
+     zero line-height so the anchor is exactly the image and not a text box a
+     few pixels taller. It brightens on hover, the same affordance the viewport
+     brandmark uses, so the two DL marks behave alike. */
+  #logo-link { display: block; flex: none; line-height: 0; }
+  #logo-link img { opacity: .82; transition: opacity .12s; }
+  #logo-link:hover img { opacity: 1; }
+  #menu-chip { position: absolute; left: 12px; top: 12px; z-index: 4; }
+  #menu-min { flex: none; }
+
+  /* The glossary popover — one card, both surfaces (menu hover and readout
+     hover), filled from the INFO table in info.js. Pointer-inert: an
+     explanation that swallowed a click would cost more than it teaches. */
+  #info-pop {
+    position: fixed; z-index: 7; max-width: 300px;
+    padding: 9px 11px; pointer-events: none;
+    background: rgba(255,255,255,.96); border: 1px solid var(--line);
+    border-left: 3px solid var(--ink-soft); border-radius: 5px;
+    box-shadow: 0 2px 10px rgba(0,0,0,.12);
+    font-size: .74rem; line-height: 1.45; color: var(--ink);
+  }
+  #info-pop b {
+    display: block; font-family: var(--font-head); font-size: .72rem;
+    text-transform: uppercase; letter-spacing: .06em; margin-bottom: 3px;
+  }
+  #info-pop i {
+    display: block; font-style: normal; color: var(--ink-soft);
+    font-size: .68rem; margin-top: 5px; padding-top: 5px;
+    border-top: 1px solid var(--line);
+  }
+
+  #brandmark {
+    position: absolute; right: 16px; bottom: 12px;
+    display: flex; align-items: center; gap: 7px;
+    font-family: var(--font-head); font-size: .76rem; color: #8a8a8a;
+    text-decoration: none; user-select: none; z-index: 2;
+  }
+  #brandmark:hover { color: var(--ink); }
+  #brandmark:hover img { opacity: 1; }
+  /* Mark to the RIGHT of the wordmark, and sized in em so it tracks the text
+     rather than being set in px beside it. At 18px it out-weighed a .76rem
+     line and read as a badge stuck on the viewport; at 1.15em it sits as part
+     of the same line. row-reverse rather than reordering the markup, so the
+     link still reads logo-then-name to a screen reader. */
+  #brandmark { flex-direction: row-reverse; }
+  #brandmark img { width: 1.15em; height: 1.15em; opacity: .75; }
+
+  /* ══ THE INTERACTION INK (2026-08-11) ════════════════════════════════════
+     Controls REST in dark grey and COMMIT to full black — hover, selection or
+     an active state all read as the same promotion, the digital-landscapes.com
+     behaviour. Scoped to CONTROLS: body text, values and readouts keep the
+     committed warm ink, because a paragraph has no hover state to promise.
+     Lives here, not in style.css, which stays byte-identical to the siblings. */
+  #sidebar button:not(.link), #sidebar select,
+  #gizmo button, #menu-chip, #menu-min {
+    color: #4a4a4a;
+  }
+  #sidebar button:not(:disabled):hover, #sidebar select:hover,
+  #gizmo button:not(:disabled):hover, #menu-chip:hover, #menu-min:hover {
+    color: #000; border-color: #4a4a4a;
+  }
+  /* ⚠️ INVERTED, AND IT IS THE ONE CONTROL THAT SHOULD BE (Marc's call). Every
+     other control here rests as line-work on paper, because they sit in a menu
+     whose whole voice is a printed sheet. This one does not: it sits ON THE
+     VIEWPORT, over terrain of any tone, and it is the way back from a folded
+     menu. A hairline outline there is a control you have to look for. Solid ink
+     with white line-work reads at a glance against pale ground and dark alike,
+     and it commits to full black on hover — the house "rest grey, commit black"
+     grammar, stated in reverse.
+     ⚠️ IT MUST COME AFTER THE GENERIC `color: #4a4a4a` RULE ABOVE. Placed
+     before it, that rule won on source order and painted the glyph the same
+     grey as its own background — a solid block with an invisible mark on it,
+     which is what the first attempt shipped.
+     ⚠️ FOLD AND UNFOLD LOOK IDENTICAL: one control in two states at one point
+     on screen, so they share every value but the glyph. */
+  #menu-chip, #menu-min {
+    background: #4a4a4a; border-color: #4a4a4a; color: #fff;
+  }
+  #menu-chip:hover, #menu-min:hover {
+    background: #000; border-color: #000; color: #fff;
+  }
+  #sidebar button.link { color: #6e6a63; }
+  #sidebar button.link:hover { color: #000; }
+  input[type=range] { accent-color: #4a4a4a; }
+  input[type=range]:hover { accent-color: #000; }
+  input[type=checkbox] { accent-color: #4a4a4a; }
+  input[type=checkbox]:hover, .check:hover input[type=checkbox] { accent-color: #000; }
+
+  /* the four live analysis rasters, named after their SAGA equivalents */
+  /* the committed theme styles .tool.on; representation buttons match it */
+  button.rep.on, button.tog.on, button.ptool.on { background: var(--ink); border-color: var(--ink); color: var(--sheet); }
+  /* Active/selected = the full-black commitment, everywhere a control latches. */
+  #sidebar button.on, button.rep.on, button.tog.on, button.ptool.on,
+  button.tool.on, #gizmo button.on {
+    background: #000; border-color: #000; color: var(--sheet);
+  }
+  /* A layer that is unavailable at this scale says so by going quiet, rather
+     than by silently doing nothing when pressed. */
+  button.tog:disabled { opacity: .45; cursor: not-allowed; }
+
+  /* THREE COLUMNS (2026-08-11), not two: seventeen layers at two-up is nine
+     rows and ~700 px of the menu's height, which pushed everything below the
+     grid off the fold. At three-up it is six rows. The thumbnails lose a
+     third of their width and lose nothing that identifies them — they are
+     read as a shape plus a caption, and both survive. */
+  /* ⚠️ FITS THE WIDTH IT IS GIVEN, RATHER THAN ALWAYS THREE (2026-08-20). The
+     grid was fixed at three columns for the 184 px readout body; moved into
+     Display it had 284 px and simply drew BIGGER tiles, staying 735 px tall in
+     a 694 px window. Phase 9 named this same grid as one of the two blocks that
+     made the left column too tall, so height is the thing to spend the width
+     on: auto-fill packs four columns at Display's width and still falls back to
+     three, or two, anywhere narrower. */
+  #panels {
+    display: grid; gap: 6px;
+    grid-template-columns: repeat(auto-fill, minmax(62px, 1fr));
+  }
+  .raster span { font-size: .62rem; letter-spacing: .04em; }
+  .raster { display: flex; flex-direction: column; gap: 3px; }
+  .raster canvas {
+    width: 100%; aspect-ratio: 1; display: block;
+    border: 1px solid var(--line); border-radius: 5px;
+    image-rendering: pixelated; background: var(--sheet);
+  }
+  .raster span {
+    font-family: var(--font-head); font-size: .7rem;
+    text-transform: uppercase; letter-spacing: .06em; color: var(--ink-soft);
+  }
+  /* ⚠️ The panels are THE way to choose a shading layer: clicking one paints
+     it on the terrain, clicking it again returns to relief. The dropdown that
+     used to list the same sixteen names again is gone — one selector, one
+     place, and the map you are looking at is the control for it. */
+  /* The interaction ink rule, applied to the maps as to every other control:
+     REST dark grey, hover or selected full black. */
+  .raster canvas { cursor: pointer; transition: border-color .12s; }
+  .raster span { color: #4a4a4a; }
+  .raster:hover canvas { border-color: #4a4a4a; }
+  .raster:hover span { color: #000; }
+  .raster.active canvas { border-color: #000; border-width: 2px; }
+  .raster.active span { color: #000; font-weight: 700; }
+  .raster.active span::before { content: "● "; }
+
+  .raster.settling canvas { opacity: .75; }
+  .raster.settling span::after { content: " ·settling"; color: var(--ink-soft); }
+
+  /* Legend, revealed on hover. Kept out of the resting layout because nine
+     permanent legends would crowd out the maps they describe. */
+  .raster { position: relative; }
+  /* ⚠️ BELOW THE PANEL'S OWN NAME, not floating over its map. This sat at
+     `bottom: 20px`, which put the legend on top of the canvas it described —
+     so reading the key meant covering the thing you were reading it for, and
+     with the panels in a 2-column grid it was not always obvious which map the
+     key belonged to. `top: 100%` anchors it under the caption of the panel
+     being hovered, which answers both. */
+  .legend {
+    position: absolute; left: 0; right: 0; top: calc(100% + 4px);
+    background: var(--panel); border: 1px solid var(--line); border-radius: 5px;
+    padding: 5px 6px 4px; box-shadow: 0 2px 8px rgba(0,0,0,.12);
+    opacity: 0; visibility: hidden;
+    /* ⚠️ DELAYED HIDE, INSTANT SHOW. Appearing must feel immediate; vanishing
+       must not, because the palette handles live inside the legend and the
+       mouse needs time to travel there. .35s is long enough to cross the 4 mm
+       gap without the key lingering after you have moved on. */
+    transition: opacity .12s ease .35s, visibility 0s linear .47s;
+    pointer-events: none; z-index: 3;
+  }
+  .raster:hover .legend {
+    opacity: 1; visibility: visible;
+    transition: opacity .12s ease 0s, visibility 0s linear 0s;
+    /* ⚠️ POINTER EVENTS BACK ON WHEN SHOWN. The legend used to float OVER the
+       canvas, so it was made inert to stop it swallowing a click meant for the
+       map. Now that it sits below the caption it cannot intercept anything —
+       and it MUST be hoverable, because :hover propagates up the DOM, so the
+       mouse resting on the legend is what keeps its own panel hovered. Left
+       inert, the key closed the instant you reached for it. */
+    pointer-events: auto;
+  }
+  /* the same legend, shown permanently under the analysis grid */
+  .legend.inline {
+    position: static; opacity: 1; visibility: visible; box-shadow: none;
+    padding: 6px 8px 5px;
+  }
+  .legend .bar { height: 9px; border-radius: 2px; border: 1px solid var(--line); }
+
+  /* Stretch handles: a triangle per end of the ramp, plus a palette caret.
+     The legend is normally inert so it cannot swallow a click meant for the
+     panel behind it; it becomes interactive only where these controls are. */
+  .legend .handles { position: relative; height: 11px; pointer-events: none; }
+  .legend .handles .h {
+    position: absolute; top: 0; width: 0; height: 0; margin-left: -4px;
+    border-left: 4px solid transparent; border-right: 4px solid transparent;
+    border-bottom: 6px solid var(--ink-soft);
+    cursor: ew-resize; pointer-events: auto; touch-action: none;
+  }
+  .legend .handles .h::after {
+    /* a bigger invisible grab area than the 8 px triangle */
+    content: ""; position: absolute; left: -6px; top: -3px; width: 20px; height: 16px;
+  }
+  .legend .handles .h:hover { border-bottom-color: var(--ink); }
+  .legend .handles.adjusted .h { border-bottom-color: var(--ink); }
+  /* A layer holding one value everywhere has no range to stretch. The handles
+     are dimmed and inert rather than merely ineffective, because a control that
+     moves and does nothing is worse than one that plainly cannot — and on the
+     flat teaching plane cut/fill, slope and ruggedness are all in this state
+     until the first gesture. The wrap keeps its tooltip, which says why. */
+  .legend .handles.inert .h { opacity: .28; pointer-events: none; }
+  /* The palette control sits on its own row. It shared the handle row once and
+     covered the upper handle, which made that handle undraggable. */
+  .legend .palrow { display: flex; justify-content: flex-end; margin-top: 3px; }
+  .legend .palrow .pal {
+    padding: 1px 4px; border: 1px solid var(--line); border-radius: 3px;
+    background: var(--sheet); cursor: pointer; pointer-events: auto;
+    font-family: var(--font-head); font-size: .62rem; line-height: 1.3;
+    color: var(--ink-soft); white-space: nowrap;
+  }
+  .legend .palrow .pal:hover { color: var(--ink); border-color: var(--ink-soft); }
+  /* An adjusted layer says so in its panel label, so a tuned stretch is never
+     invisible when you come back to the tool later. */
+  .legend .handles.adjusted ~ .ends b::after { content: " ·adj"; color: var(--ink-soft); }
+  /* The legend is inert so it cannot swallow clicks meant for the panel behind
+     it; only the controls inside it take pointer events. The hover legend must
+     also stay open while the pointer is on a handle, which it does because the
+     legend is a child of .raster and :hover therefore still holds. */
+  .legend { pointer-events: none; }
+  .raster:hover .legend { pointer-events: auto; }
+  .legend .ends {
+    display: flex; justify-content: space-between; gap: 6px;
+    font-size: .66rem; color: var(--ink-soft); margin-top: 3px;
+    font-variant-numeric: tabular-nums;
+  }
+  .legend .ends b { color: var(--ink); font-weight: 400; }
+
+  /* Categorical key: a swatch and a name per landform class, in place of the
+     gradient bar. Wraps, because ten classes will not fit on one line. */
+  .legend .keys { display: flex; flex-wrap: wrap; gap: 3px 9px; }
+  .legend .key {
+    display: flex; align-items: center; gap: 4px;
+    font-size: .66rem; color: var(--ink-soft); white-space: nowrap;
+  }
+  .legend .key i {
+    width: 9px; height: 9px; flex: none; border-radius: 2px;
+    border: 1px solid rgba(0,0,0,.15);
+  }
+  .legend .key b { color: var(--ink); font-weight: 700; font-variant-numeric: tabular-nums; }
+  /* A class that is flagged says so in the key too, not only in the trait
+     table — a reader looking at the map should not have to go elsewhere to
+     learn that the largest patch of colour is an invasive. */
+  .legend .key u {
+    text-decoration: none; margin-left: 3px; padding: 0 3px;
+    border: 1px solid var(--line); border-radius: 2px;
+    font-size: .88em; color: var(--ink-soft);
+  }
+
+  /* Chrome stays achromatic. Colour in this interface means DATA — it belongs
+     to the analysis rasters and nowhere else, so a coloured accent on a text
+     element would read as if it carried meaning. Emphasis here is weight and a
+     darker rule, not hue. */
+  #ledger {
+    border: 1px solid var(--line); border-left: 3px solid var(--ink);
+    border-radius: 5px; padding: 9px 11px;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  #ledger .net {
+    display: flex; align-items: baseline; justify-content: space-between;
+  }
+  #ledger .net b {
+    font-family: var(--font-head); font-weight: 700; font-size: 1.05rem;
+    font-variant-numeric: tabular-nums;
+  }
+  #ledger .split { color: var(--ink-soft); font-size: .74rem; font-variant-numeric: tabular-nums; }
+
+  /* ---- Plan mode ---- */
+  /* The two palettes stack exactly like a .panel does, so swapping one for the
+     other cannot change the rhythm of the sidebar. */
+  .stack { display: flex; flex-direction: column; gap: 9px; }
+
+  /* The region list reuses the committed .list rows; only the level readout is
+     new, and it is the same tabular-numeral treatment as .metric. */
+  #plan-list li.on { border-color: var(--ink); }
+  #plan-list li.on .grow { font-weight: 700; }
+  #plan-list li .val { font-family: var(--font-head); }
+
+  /* ---- The context drop target, moved to View (2026-08-16) ---- */
+  /* ⚠️ IT LOST THE SHARED STYLESHEET WHEN IT MOVED. style.css scopes the drop
+     treatment to `#dropzone`, and that file stays BYTE-IDENTICAL across the DL
+     sibling apps — so it may not gain a selector for a target only this app
+     has. The treatment is restated here instead, which is exactly what this
+     block of app-specific CSS is for. Kept identical to the shared rules, so
+     the two zones cannot drift apart visually. */
+  #dropzone-context { display: flex; flex-direction: column; gap: 7px; text-align: center; }
+  #dropzone-context .dz {
+    cursor: pointer;
+    border: 1.5px dashed var(--line); border-radius: 6px; padding: 13px 10px;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  #dropzone-context .dz.dragover { border-color: var(--ink); background: var(--bg); }
+  #dropzone-context .dz strong { font-size: .9rem; }
+  #dropzone-context .dz span { color: var(--ink-soft); font-size: .78rem; }
+  #dropzone-context > .or { color: var(--ink-soft); font-size: .72rem; }
+
+  /* ---- The selection stack ---- */
+  /* The header is a reading, not a title, so the count is set in the heading
+     face and the tabular numerals the rest of the readout uses — it changes as
+     rows are toggled and has to be legible mid-change. */
+  .sel-head { align-items: baseline; }
+  .sel-head .grow {
+    font-family: var(--font-head); font-size: .68rem;
+    letter-spacing: .08em; text-transform: uppercase; color: var(--ink-soft);
+  }
+  .sel-head .val { font-family: var(--font-head); font-variant-numeric: tabular-nums; }
+
+  /* A row carries two lines: what it is, and where it came from. One line would
+     fit only by dropping the source, which is the difference between a layer
+     you can trust and one you have to remember. */
+  #sel-stack li { align-items: flex-start; gap: 6px; padding: 5px 7px; }
+  #sel-stack li .grow { white-space: normal; overflow: visible; }
+  #sel-stack .selname {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #sel-stack .selsrc {
+    font-size: .68rem; color: var(--ink-soft); margin-top: 1px;
+  }
+  /* ⚠️ THE OPERATOR IS THE ONE GLYPH IN THE ROW THAT CARRIES MEANING, so it is
+     set in the heading face at full ink while everything around it is soft. A
+     stack is read down this column first — +, −, ∩ — and only then across. */
+  #sel-stack .selop {
+    font-family: var(--font-head); font-size: .85rem; line-height: 1;
+    min-width: 24px; text-align: center; color: var(--ink);
+  }
+  #sel-stack .seldot {
+    min-width: 22px; text-align: center; line-height: 1; font-size: .7rem;
+  }
+  /* A row that is off stays legible — it is still part of the recipe and one
+     click from acting — but it must not read as part of the sentence. */
+  #sel-stack li.off .selname, #sel-stack li.off .selsrc { opacity: .45; }
+  #sel-stack li.off .selname { text-decoration: line-through; }
+  #sel-stack li.off .selop { color: var(--ink-soft); }
+  /* Stale means the ground has moved since this layer was read off it. Marked
+     on the row rather than only in the header, because a stack of four has to
+     say WHICH one is out of date for the offer to re-read to mean anything. */
+  /* ⚠️ A DEEPENED OCHRE, NOT RED. The palette has no alert colour and does not
+     want one — every other warning in this tool is a ⚠️ in a sentence. This is
+     the one state that has to be findable by scanning a list rather than by
+     reading it, so it takes the darkest member of the existing --card family
+     and nothing more. */
+  #sel-stack li.stale { border-color: #8a6a2f; }
+  #sel-stack li.stale .selsrc { color: #8a6a2f; }
+  #sel-stack li button.relink { padding: 0; font-size: .68rem; }
+  #sel-stack li button:disabled { opacity: .3; }
+
+  /* THE GLYPH CHAIN. Read DOWN the operation column first — turn, tilt,
+     extend, bend — and only then across to what drives each, which is the same
+     way the selection stack is read and the same reason its operator column is
+     set in the heading face. A step number rather than a bullet, because the
+     one thing a reader has to take from the shape of this list is that it is
+     ORDERED: step 2 acts on what step 1 left behind. */
+  #glyph-chain { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
+  .gly-row {
+    display: grid; grid-template-columns: 14px 1fr 1fr 44px 22px 20px 20px;
+    gap: 4px; align-items: center;
+    border: 1px solid var(--line); border-radius: 4px; padding: 4px 5px;
+  }
+  .gly-row .gly-n {
+    font-family: var(--font-head); font-size: .68rem; color: var(--ink-soft);
+    text-align: center;
+  }
+  .gly-row select { min-width: 0; font-size: .72rem; padding: 2px 3px; }
+  .gly-row input[type=range] { width: 100%; }
+  .gly-row button { padding: 1px 0; font-size: .7rem; line-height: 1.2; }
+  /* ⚠️ AN INERT ROW IS MARKED, NEVER DROPPED. A bend before the first extend
+     has no line to act on; removing it would silently rewrite the sentence the
+     designer typed, and leaving it unmarked would have the panel show a step
+     that does nothing while claiming to. Same ochre, same reason, as a stale
+     selection layer — this is the other state that must be findable by
+     scanning rather than by reading. */
+  .gly-row.inert { border-color: #8a6a2f; }
+  .gly-row.inert .gly-n { color: #8a6a2f; }
+  .gly-row button.on { background: var(--ink); border-color: var(--ink); color: var(--sheet); }
+
+  #plan-level-grid {
+    display: grid; grid-template-columns: 30px 54px 1fr; gap: 8px;
+    align-items: stretch;
+  }
+  /* A VERTICAL slider, because the quantity is an elevation. A horizontal one
+     would put "higher ground" to the right, which contradicts every section and
+     every scale bar the rest of this project draws.
+     writing-mode is the standard route (Chrome 121+); direction:rtl puts the
+     MAXIMUM at the top, which is the only orientation an elevation scale can
+     have. -webkit-appearance is the pre-121 spelling and is harmless after. */
+  #plan-z {
+    writing-mode: vertical-lr; direction: rtl;
+    -webkit-appearance: slider-vertical;
+    width: 30px; height: 168px; margin: 0; accent-color: var(--ink);
+  }
+  /* The metre scale. Inset top and bottom by half a thumb so a tick lines up
+     with where the thumb's CENTRE can actually reach — a scale drawn to the
+     full track height is off by half a thumb at both ends, which at this size
+     is a real fraction of a metre. */
+  #plan-scale { position: relative; margin: 8px 0; }
+  #plan-scale b {
+    position: absolute; left: 0; right: 0; transform: translateY(-50%);
+    display: flex; align-items: center; gap: 4px;
+    font-family: var(--font-head); font-weight: 400; font-size: .66rem;
+    font-variant-numeric: tabular-nums; color: var(--ink-soft); white-space: nowrap;
+  }
+  #plan-scale b::before {
+    content: ""; width: 5px; height: 1px; background: var(--line); flex: none;
+  }
+  #plan-scale b.end { color: var(--ink); }
+  #plan-level-read { display: flex; flex-direction: column; gap: 4px; justify-content: center; }
+  #plan-preview b { font-family: var(--font-head); font-variant-numeric: tabular-nums; color: var(--ink); }
+  /* Indented under their own checkbox, because the two angles qualify it rather
+     than standing beside it. Dimmed rather than hidden when the batter is off:
+     the angles are still what WOULD be used, and hiding them would make the
+     vertical case look like a different tool instead of the 90° case of this one. */
+  #plan-batter-angles { padding-left: 20px; }
+  #plan-batter-angles.off { opacity: .4; }
+</style>
+</head>
+<body>
+<aside id="sidebar">
+  <!-- ⚠️ THE WORDMARK EXPLAINS THE TOOL (2026-08-12). What used to be a whole
+       Method section is four sentences read once, so it now answers from here
+       through the same glossary popover every layer and readout already uses —
+       the delegated [data-info] handler covers the entire sidebar, header
+       included, so this needs no wiring of its own. -->
+  <header id="menu-head" data-info="method" title="what this tool is">
+    <!-- ⚠️ THE MARK IS A LINK, and it sits inside two things that also react to
+         a click: the header carries `data-info="method"` (the Method popover)
+         and the header is the window's drag handle. Both are handled where they
+         are — the popover by stopping propagation in sidebar.js, the drag by
+         excluding this element from the pointerdown that starts one — because a
+         mark that opened an explanation, started a drag AND followed a link
+         from one press would do three things nobody asked for. Same target and
+         same destination as the viewport brandmark, so the two DL marks behave
+         alike wherever they appear. -->
+    <a id="logo-link" href="https://digital-landscapes.com/" target="_blank"
+       rel="noopener" title="digital-landscapes.com">
+      <img id="logo" src="static/logo-dl.png" alt="Digital Landscapes">
+    </a>
+    <div>
+      <!-- Set with a space, unlike the DL-TerrainDiversity used in titles and
+           provenance lines: the DL mark already sits beside this, so repeating
+           the prefix here would say it twice. Same treatment as DL-TerrainSlicer. -->
+      <h1>Terrain Diversity</h1>
+      <!-- ⚠️ NOT "an interface of care" any more. That phrase is the ECLAS 2026
+           conference theme and the title of the paper, not a description of what
+           this tool does — and the tool is now a Digital Landscapes product with
+           an identity that has to outlive one conference. The paper keeps the
+           title; the instrument says what it measures.
+           ⚠️ THE SUBTITLE IS THE CATEGORY, NOT A TAGLINE (decided 2026-08-13).
+           The h1 already names the claim; this names the KIND of thing the tool
+           is — the way "a geographic information system" sits under QGIS. TDIM
+           is Marc's own term, published on digital-landscapes.com 23 April 2018
+           ("Case Study Festvåg", Univ. of Innsbruck, Institute of Experimental
+           Architecture), so the line carries the authorship lineage as well as
+           the positioning: it predates UiT by four years, under another
+           institution. ATDIM's "A" for Alpine was that study's scoping and is
+           deliberately dropped — the model is not alpine-specific. -->
+      <div class="sub">A Terrain Design Information Model</div>
+    </div>
+    <!-- ⚠️ NOT INSIDE data-info="method"'s CLICK. The header opens the Method
+         popover, so this button stops the event: a control that also fired the
+         thing it sits on would explain the tool every time you hid the prose. -->
+    <button id="explain" title="show or hide the explanatory text">Explain</button>
+    <!-- The menu is a floating window: this folds it to the chip on the
+         viewport, for a clean recording frame. Drag the header to move it. -->
+  </header>
+
+  <!-- ══ THE TAB RAIL ═══════════════════════════════════════════════════════
+       ⚠️ NAVIGATION SEPARATED FROM CONTENT (2026-08-13, Marc: "the menu is
+       difficult to navigate and orient oneself"). Measured before the change:
+       with every section open the menu held 6,641 px of content in a 669 px
+       window — about ten screens — and the accordion gave no persistent map of
+       where those screens were. You cannot orient yourself inside a list you
+       can only see 10% of.
+
+       The rail is the map, and it never scrolls away: eight always-visible
+       marks, the current one filled, in the order the ground moves through the
+       tool. It is Blender's Properties editor answer (the reference Marc
+       raised) and it is the shape a future Blender add-on would be forced into
+       anyway — see the note in the project memory.
+
+       ⚠️ IT DRIVES THE SAME `open` STATE THE ACCORDION ALREADY ENFORCED, rather
+       than replacing it. sidebar.js already guaranteed one panel open at a
+       time, and app.js opens panels by hand in places (`sec-guide` when the
+       Guide tool is armed). So the rail is a second CONTROL for state that
+       already existed — persistence, badges and auto-open keep working
+       untouched, and a panel opened from code lights its own tab.
+
+       ⚠️ THE LETTERS ARE THE HOUSE VOICE, NOT ICONS. Eight line glyphs would
+       be eight small drawings to invent, learn and get wrong; this project
+       already sets every label in one uppercase letter-spaced face, and a
+       two-letter mark reads at this size without a legend. -->
+  <div id="menu-main">
+  <div id="menu-body">
+
+  <!-- ══ THE SECTIONS ════════════════════════════════════════════════════════
+       Six collapsible sections in the order the ground moves through them —
+       Site (what is loaded), Shape (what moves earth), Read (what the ground
+       says back), View (how it is drawn), Export (what leaves), Method (what
+       the numbers mean) — with Measured pinned open between Read and View.
+
+       ⚠️ NOT the workflow stages import→plan→modify→evaluate→export, and the
+       difference is the argument: in this tool reading is not a stage after
+       shaping, it is the other half of every gesture, and planning is not a
+       different activity from modifying — both palettes bill one ledger.
+
+       The `open` attributes below are the shipped first-boot state and they
+       are pedagogical: a student meets Site, Shape and Read open — load,
+       gesture, readout — the same argument the flat plane makes. sidebar.js
+       restores each user's own arrangement on later visits. -->
+
+  <details class="panel" id="sec-site">
+    <summary><svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><h2>Import</h2><span class="sec-badge" id="b-site"></span></summary>
+    <div class="sec-body">
+    <!-- The scene card that stood here moved into the readout's title card
+         (2026-08-11) — name, grid, extent, z-range and origin are one
+         statement about one subject, and it was being said in two places. -->
+    <!-- ⚠️ TERRAIN IS A SUB-PANEL NOW (2026-08-16, Marc). Import had its three
+         OPTIONAL inputs behind folds and its one REQUIRED input loose above
+         them, so the panel read as "here is a terrain, and also some folds" and
+         opened at the height of the loose part. The four sources are peers —
+         terrain, orthophoto, photographs, substrate — and the fold rhythm says
+         so.
+         ⚠️ AND IT IS THE ONE SUB IN THE TOOL THAT SHIPS OPEN (2026-08-17). It
+         shipped collapsed with the others for exactly one session, and Marc
+         reported the panel as broken: "if i click on the import icon or text →
+         nothing happens". It opened correctly every time — to 125 px of four
+         folded headers and nothing else, which after the tall Selection panel
+         is indistinguishable from nothing happening. A panel whose ENTIRE
+         contents are folded away has no visible subject. Terrain is Import's
+         one REQUIRED input, so it is the subject; the other three are optional
+         and stay collapsed. -->
+    <details class="sub" id="sec-terrain" open>
+      <summary class="subhead">Terrain</summary>
+      <div class="sec-body">
+    <div class="row">
+      <!-- The flat plane comes FIRST and is the default: the workshop starts in
+           the collapsed state and builds out of it. Its geolocation is the real
+           Ørndalen one, so the Troms species table, the 69.7°N sun and the SW
+           wind all still apply — only the elevations are synthetic. -->
+      <select id="tile">
+        <!-- ⚠️ THE DEFAULT, AND IT IS BUILT RATHER THAN FETCHED. Sixteen
+             deformations taken in order along the pattern library's measured
+             range, blended into one continuous surface on Ørndalen's real
+             georeference. See static/demotile.js. -->
+        <optgroup label="Teaching — synthetic">
+          <option value="generated/sixteen-deformations" selected>Sixteen deformations — 64 m @ 0.25 m</option>
+        </optgroup>
+        <optgroup label="Teaching — synthetic, flat">
+          <option value="teaching/flat75_025m.tif">Flat plane — 64 m @ 0.25 m</option>
+          <option value="teaching/flat75_4m.tif">Flat plane, context — 1 km @ 4 m</option>
+        </optgroup>
+        <!-- The 2026-07-30 pair: the flattest 64 m window in the fill-floor
+             band, which is what makes the levelling argument. -->
+        <optgroup label="Ørndalen fill floor — surveyed, © Kartverket">
+          <option value="orndalen/orndalen_fill_025m.tif">Design patch — 64 m @ 0.25 m</option>
+          <option value="orndalen/orndalen_2024_4m.tif">Context — 1 km @ 4 m</option>
+        </optgroup>
+        <!-- ⚠️ A SECOND CENTRE (2026-08-11), on the POI and the site walk —
+             NOT a replacement. 20.18 m of relief over the same 64 m against
+             the fill floor's 5.31 m: different ground, and every metric will
+             say so. See data/orndalen/SOURCE-poi-2026-08-11.txt. -->
+        <optgroup label="Ørndalen POI centre — surveyed, © Kartverket">
+          <option value="orndalen/orndalen_poi_025m.tif">Design patch — 64 m @ 0.25 m</option>
+          <option value="orndalen/orndalen_poi_4m.tif">Context — 1 km @ 4 m</option>
+        </optgroup>
+      </select>
+    </div>
+    <!-- ⚠️ THE TWO DROP TARGETS ARE NO LONGER SIDE BY SIDE (2026-08-16, Marc).
+         They were paired because the tool holds two DEMs at two scales and a
+         single drop had to guess — but they answer different questions. The
+         terrain is the thing being DESIGNED; the context is a backdrop that is
+         never edited, and it belongs with the toggle that shows it, in View.
+         The pairing is preserved where it matters: `acceptDrop` still takes
+         "site" | "context", and a drop anywhere ELSE in the window still means
+         the terrain, which is the common case and the older behaviour.
+         ⚠️ "SITE" IN THE COPY, `dz-site` IN THE CODE. The id is what app.js,
+         the drop table and the window-wide fallback all know. -->
+    <div id="dropzone">
+      <div class="dz" id="dz-site">
+        <strong>Drop a terrain</strong>
+        <span>the patch being designed — analysis, editing and species run on this</span>
+      </div>
+      <span class="or">single-band float32 DEM, any CRS · or click to choose a file</span>
+    </div>
+    <input type="file" id="file" accept=".tif,.tiff" hidden>
+      </div>
+    </details>
+
+    <!-- Substrate lives under Site rather than in a panel of its own: it is an
+         INPUT — imported or painted onto the site, computed from nothing — and
+         the panel split had it drifting far from the drop targets it belongs
+         with. Collapsible and CLOSED by default (2026-08-11): it is the
+         optional input, and open it made Site alone taller than most windows.
+         The paint tool arms a brush like Shape's do; the badge on a closed
+         Site still says so. -->
+    <!-- ══ ORTHOPHOTO ════════════════════════════════════════════════════════
+         ⚠️⚠️ LICENCE-RESTRICTED IMAGERY, LOCAL ONLY. The aerial photography
+         this is built for (Norge i bilder / Kartverket) is licensed to this
+         project for EDUCATION AND RESEARCH ONLY: it may not be redistributed,
+         published or uploaded, and nothing carrying its pixels may leave the
+         machine. There is no fetch and no bundled file — the image arrives by
+         drop, from the user's own disk, and is held in memory for the session.
+         The drape is deliberately NOT a member of state.panels, which is what
+         puts it beyond the reach of every export path. See static/ortho.js. -->
+    <details class="sub" id="sec-ortho">
+      <summary class="subhead">Orthophoto</summary>
+      <div class="sec-body">
+      <div id="ortho-dropzone">
+        <strong>Drop an orthophoto</strong>
+        <span>uncompressed RGB GeoTIFF, EPSG:25833 · draped by its own georeferencing</span>
+      </div>
+      <input type="file" id="ortho-file" accept=".tif,.tiff" hidden>
+      <div class="row">
+        <button class="tog" id="t-ortho" disabled
+          title="drape the photograph over the terrain — display only">Show ortho</button>
+      </div>
+      <div class="meta" id="ortho-note"></div>
+      <div class="teaching">
+        <b>Licensed for teaching and research only.</b> The drape is held in
+        memory for this session, is never written into any export — not the
+        figures, not the layer rasters, not <b>Everything · ZIP</b> — and is
+        discarded when the tab closes. It is a photograph of what was there,
+        not a reading of the design: no measurement on screen changes when it
+        is switched on.
+      </div>
+      </div>
+    </details>
+
+    <!-- ══ SITE PHOTOGRAPHS ══════════════════════════════════════════════════
+         Placed by their own EXIF geotags. ⚠️ OBSERVATIONS, not model output —
+         the only layer in this tool that records what someone actually saw.
+         Never exported: the pictures are the user's and may carry personal
+         data (GDPR standing rule). See static/photos.js. -->
+    <details class="sub" id="sec-photos">
+      <summary class="subhead">Site photographs</summary>
+      <div class="sec-body">
+      <div id="photo-dropzone">
+        <strong>Drop site visit photographs</strong>
+        <span>geotagged JPEGs · placed where the camera stood, aimed the way it looked</span>
+      </div>
+      <input type="file" id="photo-files" accept="image/jpeg" multiple hidden>
+      <div id="photos-tools" hidden>
+        <div class="row">
+          <button class="tog" id="t-photos" disabled
+            title="show where each photograph was taken, and its view direction">Show photo points</button>
+          <button id="photos-clear" class="link">clear</button>
+        </div>
+        <ul class="list" id="photo-list"></ul>
+      </div>
+      <div class="meta" id="photos-note"></div>
+      </div>
+    </details>
+
+    <details class="sub" id="sec-substrate">
+      <summary class="subhead">Substrate</summary>
+      <div class="sec-body">
+      <!-- A SEPARATE drop target from the terrain one, deliberately: a .tif
+           filename cannot say whether it is elevation or a soil map, so the
+           user says which by where they drop it. -->
+      <div id="soil-dropzone">
+        <strong>Drop a substrate GeoTIFF</strong>
+        <span>class codes, any integer or float type</span>
+      </div>
+      <input type="file" id="soil-file" accept=".tif,.tiff" hidden>
+      <label class="field">
+        <span>Codes mean</span>
+        <select id="soil-coding">
+          <option value="own">This tool's classes (0–6)</option>
+          <option value="ar5">NIBIO AR5 · grunnforhold</option>
+          <option value="ngu">NGU · løsmassetype</option>
+        </select>
+      </label>
+      <div class="row">
+        <button class="tool" id="t-soil" data-tool="soil">Paint substrate</button>
+        <button id="soil-clear" class="link">clear</button>
+      </div>
+      <div id="soil-classes"></div>
+      <div class="meta" id="soil-note"></div>
+      </div>
+    </details>
+    </div>
+  </details>
+
+
+  <!-- ⚠️ "TERRAIN MODIFIERS", not "Shape" (2026-08-11, Marc's framing): the
+       section reads as a SERIES OF MODIFIERS on the ground — the brushes, the
+       region levelling with its batter, and the Stamp — all billing the one
+       ledger that closes the section. -->
+  <!-- ══ SELECTION ═══════════════════════════════════════════════════════════
+       Its own top-level panel (Marc's call, 2026-08-13), between the site and
+       the modifiers, because SELECT → MODIFY → READ is the tool's grammar
+       (DESIGN-who-needs-what.md) and a selection is not a modification. Both
+       ways of building one live here: DRAWN — regions traced in the locked
+       plan — and RULED, where the ground itself satisfies a condition; they
+       intersect, and a rule narrows a drawn region, never widens it. Future
+       ways (protection masks — "never touch this ground") belong here too.
+       The id stays `sec-where` so the fold state persists across the move.
+       What ACTS on a selected region — Level to datum, with its batter —
+       stays with the modifiers, where acting belongs. -->
+  <details class="panel" id="sec-where">
+    <summary><svg viewBox="0 0 24 24"><path d="M6.13 1L6 16a2 2 0 0 0 2 2h15"/><path d="M1 6.13L16 6a2 2 0 0 1 2 2v15"/></svg><h2>Select</h2><span class="sec-badge" id="b-where"></span></summary>
+    <div class="sec-body">
+
+    <!-- Drawn selections. Picking a tool ENTERS the locked plan view itself —
+         tracing is falsified by perspective, so the lock is not optional, it
+         is simply not a separate switch to find. The Guide trace button lives
+         with the Guide curve modifier: a centreline is a setting-out line,
+         not a selection. -->
+    <!-- ⚠️ THE LIST COMES FIRST, OUTSIDE THE FOLDS (Marc, 2026-08-13). What has
+         been selected is the state of this panel; HOW it was made — traced,
+         imported, or read off the ground — is a means. Keeping the list above
+         the three sources means you always see what is selected without opening
+         anything, and the folds stay shut until you are making something new. -->
+    <!-- ⚠️ THE COMPOSED SELECTION SITS ABOVE THE REGION LIST, and it is the
+         first thing in the panel because it is the panel's answer. The list
+         below it is the design objects the tool holds; this is what the
+         modifiers will actually act inside. See static/selection.js — an
+         ordered stack rather than a boolean tree, because a general expression
+         needs parentheses and neither survives a 260 px panel. -->
+    <div id="sel-stack-wrap" class="stack" hidden>
+      <div class="row sel-head">
+        <span class="grow">Selection</span>
+        <span class="val" id="sel-count">—</span>
+      </div>
+      <ul class="list" id="sel-stack"></ul>
+      <div class="meta" id="sel-note"></div>
+      <!-- ⚠️ THE FEATHER IS A LENGTH ON THE GROUND, IN METRES, and it belongs
+           with the SELECTION rather than with any one modifier: it says how far
+           past the selected ground a modifier is allowed to reach, so the brush,
+           the stamp and the terrace all mean the same thing by it. At 0 the
+           selection is a hard edge and a stroke stops dead at the boundary,
+           leaving a step; above 0 the stroke dies away across that distance with
+           zero slope at both ends, so it leaves the selection and rejoins the
+           untouched ground tangentially instead of creasing. -->
+      <label class="field" id="sel-feather-field">
+        <span>Feather <em id="sel-feather-val">0.0 m</em></span>
+        <input type="range" id="sel-feather" min="0" max="20" step="0.5" value="0">
+      </label>
+      <div class="row">
+        <button id="sel-show" class="link">show selection</button>
+        <button id="sel-reeval" class="link" hidden>re-evaluate</button>
+        <button id="sel-clear" class="link">clear stack</button>
+      </div>
+      <div class="teaching">
+        Rows combine <b>top to bottom</b>, starting from nothing: <b>+</b> adds,
+        <b>−</b> takes away, <b>∩</b> keeps only what is also inside. So
+        <em>steep ground, but not the high part of it, and only within the site
+        boundary</em> is three rows in that order — and the order is the
+        meaning, which is why rows move rather than sort. A saved layer is
+        <b>frozen</b>: it holds the cells you accepted rather than re-reading
+        the ground under you mid-cut. One read off the surface says so and
+        offers to re-read when the ground moves; a polygon never does, because
+        geometry does not move when the ground is cut.
+      </div>
+    </div>
+
+    <div id="plan-select" class="stack" hidden>
+      <ul class="list" id="plan-list"></ul>
+      <div class="meta" id="plan-empty">
+        Nothing selected yet. Open a source below — trace one, bring one in, or
+        read one off the ground.
+      </div>
+      <div class="row">
+        <button id="plan-show-all" class="link">show all</button>
+        <button id="plan-hide-all" class="link">hide all</button>
+      </div>
+    </div>
+
+    <details class="sub" id="sec-sel-draw">
+      <summary class="subhead">By drawing</summary>
+      <div class="sec-body">
+    <div id="plan-draw-tools">
+      <div class="row">
+        <button class="ptool" id="pt-draw" data-ptool="draw">Draw</button>
+        <button class="ptool" id="pt-hole" data-ptool="hole">Hole</button>
+        <button class="ptool" id="pt-edit" data-ptool="edit">Select</button>
+      </div>
+    </div>
+      <div class="meta keys">
+        <b>click</b> place a vertex · <b>double-click</b> or <b>first vertex</b> close the ring<br>
+        <b>Esc</b> cancel · <b>Backspace</b> undo a vertex · <b>Delete</b> remove the selection<br>
+        <b>drag</b> pan · <b>wheel</b> zoom — a plan is a sheet, so it does not orbit
+      </div>
+      </div>
+    </details>
+
+    <!-- ⚠️ IMPORT MOVED HERE FROM EXPORT (2026-08-13), where it had been living
+         as a "import…" link beside the shapefile writer. Reading polygons in is
+         not exporting: by this interface's own rule it is a way of BUILDING a
+         selection, and it belongs beside the other two. The reader itself is
+         unchanged — export/shapefile-read.js, one feature to one region. -->
+    <details class="sub" id="sec-sel-import">
+      <summary class="subhead">From a file</summary>
+      <div class="sec-body">
+      <div class="row">
+        <button id="plan-import">Polygon shapefile…</button>
+      </div>
+      <input type="file" id="plan-shp" accept=".shp,.prj,.dbf,.shx" multiple hidden>
+      <div class="meta">
+        Select the <b>.shp</b>, and the <b>.prj</b> with it if you have one —
+        nothing is reprojected, so a mismatched CRS is named rather than
+        silently assumed. One feature becomes one region, holes included.
+        <b>DXF is not read yet</b>; see the note in the design document.
+      </div>
+      </div>
+    </details>
+
+
+    <!-- ⚠️ "BY ATTRIBUTE", NOT "RULE" (Marc asked for a better name,
+         2026-08-13). "Rule" said how the tool works; "by attribute" says what
+         the user is doing, and it is the phrase every GIS uses for exactly this
+         — select by attribute, against a layer and a range. It also sits as a
+         peer beside Draw and Import: three ways of answering one question,
+         named for the three sources rather than for three mechanisms.
+         See static/rules.js. -->
+    <details class="sub" id="sec-sel-rule">
+      <summary class="subhead">By attribute</summary>
+      <div class="sec-body">
+    <div class="row">
+      <label class="field">
+        <span>Layer</span>
+        <select id="rule-layer"></select>
+      </label>
+    </div>
+    <!-- A continuous layer is bounded by two sliders… -->
+    <div class="row" id="rule-range">
+      <label class="field">
+        <span>At least <em id="rule-min-val">—</em></span>
+        <input type="range" id="rule-min" min="0" max="100" step="1" value="0">
+      </label>
+      <label class="field">
+        <span>At most <em id="rule-max-val">—</em></span>
+        <input type="range" id="rule-max" min="0" max="100" step="1" value="100">
+      </label>
+    </div>
+    <!-- ⚠️ …AND A CATEGORICAL ONE IS PICKED BY MEMBERSHIP, because its values
+         are CLASS CODES with no order. Comparing landform classes with < and >
+         would rank a hollow against a shoulder, which is the same mistake the
+         legend refuses to make by drawing a key instead of a ramp. -->
+    <div id="rule-classes" hidden>
+      <div class="row" id="rule-class-list"></div>
+      <div class="row">
+        <button id="rule-class-all" class="link">all</button>
+        <button id="rule-class-none" class="link">none</button>
+      </div>
+    </div>
+    <div class="row">
+      <button class="tog" id="t-rule"
+        title="restrict every modifier to the cells this rule selects">Rule on</button>
+      <button id="rule-save"
+        title="freeze these cells as a layer in the selection stack">Save as layer</button>
+      <button id="rule-show" class="link">show selection</button>
+    </div>
+    <div class="teaching" id="rule-note">
+      A selection is where the modifiers are allowed to act; an attribute is
+      one way of building one. It reads the CURRENT surface, so re-applying it
+      after an edit selects different cells — "where it is steep" means where
+      it is steep now. Cells with no answer (wetness on level ground, aspect
+      on a flat cell) are excluded, never counted as zero.
+    </div>
+      </div>
+    </details>
+    </div>
+  </details>
+
+  <details class="panel" id="sec-shape">
+    <summary><svg viewBox="0 0 24 24"><path d="M2 20h20"/><path d="M4 20c3-7 6-9 8-9s5 2 8 9"/><line x1="12" y1="2" x2="12" y2="8"/><polyline points="9.5 5.5 12 8 14.5 5.5"/></svg><h2>Modify</h2><span class="sec-badge" id="b-shape"></span></summary>
+    <div class="sec-body">
+    <!-- ⚠️ HIDDEN (2026-08-11): the mode follows the tool now — picking Draw,
+         Hole, Select or Cut section locks the plan camera by itself, picking
+         a brush releases it — so a separate mode switch could only disagree
+         with the hand. The element stays: setPlanMode mirrors its state for
+         the section badge and the test hooks. -->
+    <div class="row" id="plan-mode-row" hidden>
+      <button class="tog" id="t-plan"
+        title="lock the camera to plan and draw regions instead of painting">Plan mode</button>
+    </div>
+
+    <!-- The two palettes, BOTH always on the menu (2026-08-11): the mode
+         follows the tool — a drawing tool locks the plan camera, a brush
+         releases it — so the `on` highlight is what says which hand is armed.
+         The ledger below stays put across every switch, because both palettes
+         move earth into the same account. -->
+    <!-- ⚠️ FOUR MODIFIERS, EACH ITS OWN FOLD (Marc, 2026-08-13). The brush
+         palette used to sit loose at the top of the panel while benching, the
+         guide and the stamp were folds beneath it — so three of the four ways
+         this tool moves earth looked like sub-features of the first one. They
+         are peers: a brush, a terrace system, a swept curve and a stamped
+         field, all billing the same ledger. Giving the brushes a fold of their
+         own is what makes that legible, and it lets the whole panel close down
+         to four lines. -->
+    <details class="sub" id="sec-brush">
+      <summary class="subhead">Brush</summary>
+      <div class="sec-body">
+    <div id="brush-tools" class="stack">
+      <div class="row">
+        <button class="tool" id="t-level" data-tool="level"
+          title="level — pull the disc to one elevation (L)">Level</button>
+        <button class="tool" id="t-smooth" data-tool="smooth"
+          title="soften roughness while keeping the landform — unlike Level, which pulls the whole disc to one elevation">Smooth</button>
+        <!-- ⚠️ NAMED FOR THE EARTHWORK, NOT THE GESTURE (Marc, 2026-08-13).
+             "Scoop" and "Mound" describe the hand; CUT and FILL are what the
+             ledger, the grading plan, the isopach, the section sheet and every
+             contractor call the same two operations. One vocabulary from the
+             brush to the drawing.
+             ⚠️ THE `data-tool` IDS STAY `scoop` AND `mound`. They are the names
+             brush.js knows, the ones the history entries and the status lines
+             carry, and the ones the kernel suite asserts on — renaming the
+             label is a display change, renaming the id would be a change to
+             the tool vocabulary itself. -->
+        <button class="tool" id="t-scoop" data-tool="scoop"
+          title="cut — take material away (C, or −)">Cut</button>
+        <button class="tool" id="t-mound" data-tool="mound"
+          title="fill — place material (F, or +)">Fill</button>
+      </div>
+      <label class="check">
+        <input type="checkbox" id="datum"> Level to datum (planarize)
+      </label>
+      <label class="field">
+        <span>Brush radius <em id="radius-val">2.0 m</em></span>
+        <input type="range" id="radius" min="0.5" max="12" step="0.25" value="2">
+      </label>
+      <label class="field">
+        <span>Strength <em id="strength-val">0.15 m</em></span>
+        <input type="range" id="strength" min="0.02" max="1" step="0.01" value="0.15">
+      </label>
+    </div>
+      </div>
+    </details>
+
+    <!-- The drawing tools moved to the SELECTION panel (2026-08-13) — drawing
+         a region is building a selection, not modifying ground. The Guide
+         trace button moved into the Guide curve sub below: a centreline is a
+         modifier's setting-out line. What stays here is what ACTS: the level
+         slider and its batter, shown for whichever region the Selection
+         panel's list has selected. -->
+    <div id="plan-tools" class="stack" hidden>
+      <!-- The level slider. Bounded by the elevation range UNDER THE REGION,
+           not by the tile's, so every position on it is a datum that exists
+           somewhere inside the ring being levelled. -->
+      <div id="plan-level" hidden>
+        <div id="plan-level-grid">
+          <input type="range" id="plan-z" min="0" max="1" step="0.001" value="0"
+            title="datum to level this region to">
+          <div id="plan-scale"></div>
+          <div id="plan-level-read">
+            <div class="metric"><span>Datum</span><b id="plan-z-val">—</b></div>
+            <div class="metric"><span>Region mean</span><b id="plan-z-mean">—</b></div>
+            <div class="metric"><span>Cells inside</span><b id="plan-cells">—</b></div>
+            <div class="metric"><span>Polygon area</span><b id="plan-area">—</b></div>
+          </div>
+        </div>
+        <!-- The edge condition. A platform's boundary is a design decision and
+             it is made HERE, explicitly, rather than smuggled in as a soft
+             brush edge — which is why levelTo has no falloff of its own.
+             ⚠️ Two angles, not one: a cutting exposes ground that stands at its
+             own stability, a bank is built of loose material that ravels to its
+             repose angle. Grading both alike gives an embankment too steep to
+             stand and an over-wide cutting at the same time. -->
+        <label class="check">
+          <input type="checkbox" id="plan-batter-on" checked> Grade a batter to meet existing ground
+        </label>
+        <div id="plan-batter-angles">
+          <label class="field">
+            <span>Cutting <em id="plan-cut-val">45°</em></span>
+            <input type="range" id="plan-cut-deg" min="15" max="90" step="1" value="45"
+              title="the angle exposed ground will stand at — 90° is bedrock, and gives the hard edge">
+          </label>
+          <label class="field">
+            <span>Embankment <em id="plan-fill-val">34°</em></span>
+            <input type="range" id="plan-fill-deg" min="15" max="90" step="1" value="34"
+              title="the repose angle of the material you place — loose fill will not hold steeper">
+          </label>
+        </div>
+        <div class="row">
+          <button id="plan-apply">Level to datum</button>
+        </div>
+        <div class="row">
+          <button id="plan-mean" class="link">…or to the region's own mean, which is volume-neutral</button>
+        </div>
+        <!-- Where the asymmetry is stated in words, every time, on the numbers
+             actually in front of the user. -->
+        <div class="teaching" id="plan-preview"></div>
+      </div>
+    </div>
+
+    <!-- ══ STAMP ═════════════════════════════════════════════════════════════
+         A whole field of relief placed in one operation, rather than brushed
+         on. This is how designed micro-relief actually reaches a site: set out
+         from a drawing, not modelled by hand. The two sources go through one
+         pipeline — see static/pattern.js. Named as the third MODIFIER
+         (2026-08-11): brush, level, stamp — all billing the one ledger. -->
+    <!-- ══ BENCHING ══════════════════════════════════════════════════════════
+         The second family: a target field read off the terrain's own
+         ELEVATION, so treads follow every contour without being drawn. The
+         tread width is an OUTPUT — Δ / tanβ — which is how contour terracing
+         is actually set out. See static/bench.js. -->
+    <!-- ⚠️ "TERRACE", NOT "BENCHING" (Marc, 2026-08-13). Both words are used in
+         earthworks and they are not quite synonyms: benching is cutting steps
+         into a slope, often to key fill into it or to hold it stable; terracing
+         is making level treads a slope can be USED on. What this modifier does
+         is the second — the tread width is its output, the levels follow the
+         contours, and the whole landform-terracing finding is about what those
+         treads do to habitat. The module stays `bench.js` and the kernel group
+         stays B2: the operation is unchanged, only its name in the interface. -->
+    <details class="sub" id="sec-bench">
+      <summary class="subhead">Terrace</summary>
+      <div class="sec-body">
+      <label class="field">
+        <span>Vertical interval <em id="bench-int-val">1.0 m</em></span>
+        <input type="range" id="bench-interval" min="0.1" max="5" step="0.1" value="1">
+      </label>
+      <label class="field">
+        <span>Tread share of interval <em id="bench-tread-val">70%</em></span>
+        <input type="range" id="bench-tread" min="0.1" max="1" step="0.05" value="0.7">
+      </label>
+      <label class="field">
+        <span>Volume policy</span>
+        <select id="bench-bias">
+          <option value="balanced">balanced — cut above, fill below</option>
+          <option value="cut">cut only — never import material</option>
+          <option value="fill">fill only — never remove material</option>
+        </select>
+      </label>
+      <div class="row">
+        <button id="bench-apply"><b>Cut the terraces</b></button>
+      </div>
+      <div class="teaching" id="bench-preview"></div>
+
+      <!-- THE PATCHWORK, DRAWN. The partition the experiment benches: seams
+           where two workable landform patches meet, and each patch's terrace
+           line as a tick — the Douro reading, on this ground. Computed at the
+           press from the current surface; edits re-drape the lines but never
+           re-partition. See static/patch-view.js. -->
+      <div class="row">
+        <button class="tog" id="t-patches"
+          title="draw the landform patches and their terrace bearings">Show patches</button>
+      </div>
+
+      <!-- THE EXPERIMENT. Phase 8E's uniform-vs-landform-patch measurement,
+           as a button instead of a console session, so anyone can re-run it
+           on any ground. Parameters are constants of the experiment (see
+           static/compare.js) — two groups pressing this on the same tile get
+           the same experiment. It never touches the live surface. -->
+      <div class="row">
+        <button id="bench-compare">Measure: uniform vs by landform patch</button>
+      </div>
+      <div class="teaching">
+        Benches the whole tile twice at each target tread — once with one
+        interval and one datum, once patch by landform patch on each patch's
+        own slope and floor — with the uniform interval searched so both
+        schemes move the <b>same volume</b>. Reads the surface as it stands
+        and changes nothing.
+      </div>
+      <div id="bench-compare-out" hidden></div>
+      </div>
+    </details>
+
+    <!-- GUIDE CURVES. The missing designer primitive: regions say "this
+         ground", sections say "read here", and neither says "along here".
+         Three separate decisions, kept separate on purpose — the same line and
+         the same cross-section make a swale, a contour bund or a road ditch
+         depending only on what the centreline does with height, and that is the
+         difference between infiltration and conveyance. See static/guide.js. -->
+    <details class="sub" id="sec-guide">
+      <summary class="subhead">Curve</summary>
+      <div class="sec-body">
+      <!-- A centreline, not a boundary — traced in the same locked plan the
+           regions are, because in a tilted view the spacing between two
+           clicks depends on the angle the ray met the ground at. It lives
+           HERE rather than with the selection tools (2026-08-13): a guide is
+           the modifier's own setting-out line. -->
+      <div class="row">
+        <button class="ptool" id="pt-guide" data-ptool="guide"
+          title="trace a centreline and sweep a cross-section along it">Curve</button>
+      </div>
+      <!-- ⚠️ THE STEPS ARE `.meta.keys`, WHICH IS EXEMPT FROM LEAN MODE, AND
+           THEY STAY ON SCREEN ONCE THE LINE EXISTS (2026-08-19). Both were
+           defects and both made this the least intuitive tool in the app.
+           `#guide-empty` was hidden the moment the first point landed — so the
+           instructions disappeared exactly when they started being needed, and
+           what replaced them was six sliders and no sentence. -->
+      <div class="meta keys" id="guide-empty">
+        <b>1.</b> Press <b>Curve</b> above — the view locks to plan, because a
+        line traced in a tilted view lands somewhere other than where it looked.<br>
+        <b>2.</b> Click along the ground to place points. Two make a line, more
+        give it bends. <b>There is nothing to finish</b> — the line is whatever
+        you have clicked so far, and it keeps extending until you cut it.<br>
+        <b>3.</b> Choose a cross-section, and what the line does with height —
+        <b>level</b> holds water, <b>grade</b> moves it, <b>follow</b> keeps a
+        constant depth below the ground.<br>
+        <b>4.</b> The sentence below prices it before anything moves.
+        <b>Cut the curve</b> commits it; <b>Ctrl+Z</b> takes it back, and
+        <b>clear the line</b> throws the line away without cutting.
+      </div>
+      <div id="guide-tools" hidden>
+        <label class="field">
+          <span>Cross-section</span>
+          <select id="guide-profile"></select>
+        </label>
+        <div class="meta" id="guide-profile-note"></div>
+        <label class="field">
+          <span>Bottom / top width <em id="guide-w-val">2.0 m</em></span>
+          <input type="range" id="guide-width" min="0.5" max="12" step="0.1" value="2">
+        </label>
+        <label class="field">
+          <span>Depth / height <em id="guide-d-val">0.50 m</em></span>
+          <input type="range" id="guide-depth" min="0.05" max="4" step="0.05" value="0.5">
+        </label>
+        <label class="field">
+          <span>Side slope <em id="guide-s-val">34°</em></span>
+          <input type="range" id="guide-side" min="10" max="80" step="1" value="34">
+        </label>
+        <!-- ⚠️ The control that decides what the structure is FOR. -->
+        <label class="field">
+          <span>Along the line</span>
+          <select id="guide-along"></select>
+        </label>
+        <div class="meta" id="guide-along-note"></div>
+        <label class="field" id="guide-grad-field">
+          <span>Gradient <em id="guide-g-val">1.0%</em></span>
+          <input type="range" id="guide-grad" min="-10" max="10" step="0.1" value="1">
+        </label>
+        <div class="row">
+          <button id="guide-apply"><b>Cut the curve</b></button>
+          <button id="guide-clear" class="link">clear the line</button>
+        </div>
+        <div class="teaching" id="guide-preview"></div>
+      </div>
+      <div class="meta">
+        The edge condition uses the same two batter angles as plan levelling —
+        a cutting stands at its own stability, an embankment ravels to its
+        repose angle. A graded channel conveys water; this tool states the
+        gradient and the volume, never a speed.
+      </div>
+      </div>
+    </details>
+
+    <details class="sub" id="sec-stamp">
+      <summary class="subhead" id="shape-pattern-subhead">Pattern</summary>
+      <div class="sec-body">
+    <!-- NOT class="tool": that selector drives the brush palette and reads
+         data-tool, so a button sharing it would silently arm the scoop. Same
+         trap the Vegetation, Context and Plan buttons each carry a note about. -->
+    <!-- ⚠️ THE INITIAL on/hidden STATE HERE IS ONLY A FIRST GUESS. It is
+         overwritten at boot by setPatternSource(state.pattern.source), so the
+         markup and the state cannot drift apart — which they had, the panel
+         opening on an empty image slot while the library sat behind a click. -->
+    <div class="row">
+      <button class="psrc" id="ps-image" data-psrc="image"
+        title="stamp a drawing: black cuts, white fills">Image</button>
+      <button class="psrc on" id="ps-generated" data-psrc="generated"
+        title="stamp a pattern from the library at a stated module">Pattern</button>
+    </div>
+
+    <div id="pat-src-image" class="stack" hidden>
+      <div id="pat-dropzone">
+        <strong>Drop a pattern image</strong>
+        <span>PNG or JPEG · black cuts, white fills, mid-grey leaves alone</span>
+      </div>
+      <input type="file" id="pat-file" accept="image/*" hidden>
+    </div>
+
+    <div id="pat-src-generated" class="stack">
+      <!-- ⚠️ THE PATTERN IS THE MOST CONSEQUENTIAL CHOICE HERE, not the
+           amplitude. Measured at identical amplitude, wavelength and volume: a
+           lozenge matrix returns 7/7 habitat classes at 29% invasive where
+           undirected undulation returns 3/7 at 75%. The picker is therefore an
+           argument, not a convenience. -->
+      <button id="pat-pick" class="picker">Lozenge matrix ▾</button>
+      <div id="pat-library" hidden></div>
+      <div class="meta" id="pat-pattern-note"></div>
+      <!-- ⚠️ MODULE IS THE SECOND CONTROL THAT MATTERS, and it is listed above
+           amplitude deliberately. Measured at ±25 mm undulation: Shannon 0.266
+           at a 1.5 m wavelength, 0.460 at 4 m, 0.560 at 8 m. An amplitude quoted
+           without its module is not a reproducible statement about a surface. -->
+      <label class="field">
+        <span>Module <em id="pat-wave-val">8.0 m</em></span>
+        <input type="range" id="pat-wave" min="0.5" max="16" step="0.5" value="8"
+          title="the ground length of one repeat — a grader blade is metres wide">
+      </label>
+      <div class="row" id="pat-seed-row">
+        <button id="pat-reseed" class="link">draw a different field</button>
+      </div>
+    </div>
+
+    <div id="pat-thumb-wrap">
+      <canvas id="pat-thumb" width="128" height="128"></canvas>
+      <span id="pat-thumb-note">no pattern</span>
+    </div>
+
+    <!-- The two handles. Same control, same look and same idiom as the stretch
+         handles on an analysis legend: an input-levels pair over the pattern's
+         own 0–1 range. Apart or together changes contrast; both the same way
+         moves the neutral grey, which tips the whole stamp toward cut or fill. -->
+    <div class="legend inline" id="pat-levels">
+      <div class="bar" style="background:linear-gradient(90deg,#000,#fff)"></div>
+      <div class="handles">
+        <i class="h lo"></i><i class="h hi"></i>
+      </div>
+      <div class="ends">
+        <span><b>cut</b> <em id="pat-lo-val">0%</em></span>
+        <span><em id="pat-hi-val">100%</em> <b>fill</b></span>
+      </div>
+    </div>
+
+    <label class="field">
+      <span>Amplitude <em id="pat-amp-val">±0.100 m</em></span>
+      <!-- Logarithmic: the slider has to reach a 10 mm construction tolerance
+           and a 2 m landform on the same track, and a linear range would put
+           the entire tolerance band in its first two steps. -->
+      <!-- ⚠️ DEFAULTS TO THE AMPLITUDE THE MEASURED FIGURES ARE QUOTED AT. The
+           library's note beside this slider states each pattern's result "on
+           this patch at ±0.21 m, 8 m module"; opening at ±0.10 m meant the
+           default stamp was less than half the move those numbers describe, so
+           a student following the default got results that did not match the
+           text next to it. Step is 0.1 rather than 1 because the scale is
+           exponential and whole steps cannot reach 0.21 — 62 lands on 0.205,
+           2.3% out, which is exactly the kind of quiet mismatch this tool is
+           supposed not to have. 62.4 gives ±0.2102 m. -->
+      <input type="range" id="pat-amp" min="0" max="100" step="0.1" value="62.4">
+    </label>
+    <label class="check">
+      <input type="checkbox" id="pat-invert"> Invert — white cuts, black fills
+    </label>
+
+    <div class="row">
+      <button id="pat-apply"><b>Stamp pattern</b></button>
+    </div>
+    <div class="teaching" id="pat-preview"></div>
+    <div class="meta" id="pat-note">
+      The stamp bills the same ledger as the brushes. It is volume-neutral only
+      when the pattern averages out over the ground it covers — a symmetric
+      drawing very nearly is, a hand-drawn one is not, and the net figure says
+      which. With a region selected in Plan mode the pattern is confined to it.
+    </div>
+      </div>
+    </details>
+
+    <!-- The one account every gesture in this section bills — which is why the
+         ledger closes the section rather than sitting inside any one palette.
+         ⚠️ THE LEDGER, THE UNDO ROW AND #brush-tools ABOVE ARE MOVED, NOT
+         COPIED, into the instrument dock while that mode is on — see
+         setInstrument. Same elements, same handlers, one source of truth;
+         #shape-keys is the anchor they return to in front of. -->
+    <div id="ledger">
+      <div class="net"><span>Net earth moved</span><b id="l-net">±0.0 m³</b></div>
+      <div class="split">cut <span id="l-cut">0.0</span> m³ · fill <span id="l-fill">0.0</span> m³</div>
+    </div>
+    <div class="row" id="undo-row">
+      <button id="undo" disabled>Undo</button>
+      <button id="redo" disabled>Redo</button>
+      <button id="undo-all" class="link">reset terrain</button>
+    </div>
+    <div class="meta keys" id="shape-keys">
+      <b>Ctrl+Z</b> undo · <b>Ctrl+Shift+Z</b> or <b>Ctrl+Y</b> redo —
+      strokes, stamps, levelling, substrate paint and the reset itself
+    </div>
+    </div>
+  </details>
+
+  <details class="panel" id="sec-read" open>
+    <summary><h2>Read</h2><span class="sec-badge" id="b-read"></span></summary>
+    <div class="sec-body">
+    <div id="panels">
+      <div class="raster" id="p-elevation"><canvas width="256" height="256"></canvas><span>Elevation</span></div>
+      <div class="raster" id="p-slope"><canvas width="256" height="256"></canvas><span>Slope</span></div>
+      <div class="raster" id="p-aspect"><canvas width="256" height="256"></canvas><span>Aspect</span></div>
+      <div class="raster" id="p-twi"><canvas width="256" height="256"></canvas><span>TWI · wetness</span></div>
+      <div class="raster" id="p-catchment"><canvas width="256" height="256"></canvas><span>Catchment area</span></div>
+      <div class="raster" id="p-cutfill"><canvas width="256" height="256"></canvas><span>Cut / fill</span></div>
+      <div class="raster" id="p-depression"><canvas width="256" height="256"></canvas><span>Closed depressions</span></div>
+      <div class="raster" id="p-tri"><canvas width="256" height="256"></canvas><span>Ruggedness</span></div>
+      <div class="raster" id="p-svf"><canvas width="256" height="256"></canvas><span>Sky view factor</span></div>
+      <div class="raster" id="p-openness"><canvas width="256" height="256"></canvas><span>Openness</span></div>
+      <div class="raster" id="p-solar"><canvas width="256" height="256"></canvas><span>Solar · Apr–Sep</span></div>
+      <div class="raster" id="p-wind"><canvas width="256" height="256"></canvas><span>Wind exposure · SW</span></div>
+      <div class="raster" id="p-geomorphon"><canvas width="256" height="256"></canvas><span>Landforms</span></div>
+      <div class="raster" id="p-watershed"><canvas width="256" height="256"></canvas><span>Watersheds</span></div>
+      <!-- The end of the care loop: the only layer here that is not a
+           measurement. Everything above it is terrain analysis; this one is an
+           assumption about what tolerates the result, which is why the trait
+           table below is on screen rather than in the source. -->
+      <div class="raster" id="p-species"><canvas width="256" height="256"></canvas><span>Species assemblage</span></div>
+      <!-- The only layer here that is not derived from elevation. It is
+           imported or specified; nothing computes it. -->
+      <div class="raster" id="p-soil"><canvas width="256" height="256"></canvas><span>Substrate</span></div>
+      <!-- Hillshade is the odd one out and deliberately so: it is not an
+           analysis layer but the FORM itself, and clicking it takes the 3D
+           view to plain white — the "no data interpreting the terrain" state.
+           Putting it in the grid makes that state reachable where every other
+           view is chosen. -->
+      <div class="raster" id="p-hillshade"><canvas width="256" height="256"></canvas><span>Hillshade · form only</span></div>
+    </div>
+    <div class="meta">
+      <b>Click a map</b> to paint it on the terrain · <b>click it again</b> for
+      plain relief · hillshade is form alone, no layer read onto it
+    </div>
+    <!-- The selected layer's legend, permanent while a layer is painted — the
+         hover keys above vanish with the pointer, and the one being READ FROM
+         has to hold still. -->
+    <div id="shade-legend-row" hidden>
+      <div class="legend inline" id="shade-legend"></div>
+    </div>
+    <label class="field">
+      <span>Solar period <em id="solar-val">1 Apr – 30 Sep</em></span>
+      <select id="solar-period">
+        <option value="91,273">Growing season · Apr–Sep</option>
+        <option value="1,365">Whole year</option>
+        <option value="152,213">High summer · Jun–Jul</option>
+        <option value="91,151">Spring · Apr–May</option>
+        <option value="244,304">Autumn · Sep–Oct</option>
+        <option value="60,90">Snowmelt · Mar</option>
+        <option value="172,172">Solstice · 21 Jun</option>
+      </select>
+    </label>
+    <div class="meta" id="solar-note"></div>
+
+    <!-- ══ SYMBOLS ═════════════════════════════════════════════════════════
+         The same layers again, as SIZE instead of as colour. A ramp shows a
+         field and is very hard to read a value off; a circle whose diameter is
+         the value is the opposite trade — it loses the smooth field and it can
+         be measured against a legend. See static/symbols.js. -->
+    <details class="sub" id="sec-symbols">
+      <summary class="subhead">Proportional symbols</summary>
+      <div class="sec-body">
+      <div class="row">
+        <button class="tog" id="t-symbols"
+          title="draw one circle per sampled cell, sized by the layer's value">Symbols</button>
+      </div>
+      <div id="symbol-tools" hidden>
+        <label class="field">
+          <span>Layer</span>
+          <select id="sym-layer"></select>
+        </label>
+        <label class="field">
+          <span>Every <em id="sym-stride-val">6th</em> cell</span>
+          <input type="range" id="sym-stride" min="1" max="24" step="1" value="6">
+        </label>
+        <!-- Below this normalised value nothing is drawn at all: a symbol map
+             of a layer that is mostly near zero is mostly ink saying nothing. -->
+        <label class="field">
+          <span>Draw above <em id="sym-thr-val">0%</em> of the range</span>
+          <input type="range" id="sym-threshold" min="0" max="90" step="1" value="0">
+        </label>
+        <label class="field">
+          <span>Smallest circle <em id="sym-min-val">8%</em></span>
+          <input type="range" id="sym-min" min="0" max="40" step="1" value="8">
+        </label>
+        <canvas id="sym-legend" width="520" height="200"
+          title="the value each circle size stands for"></canvas>
+        <div class="meta" id="sym-note"></div>
+      </div>
+      </div>
+    </details>
+
+    <!-- ══ WATER ═══════════════════════════════════════════════════════════
+         Fill and spill: put a rainfall depth on this ground and see where it
+         comes to rest. NOT a flood model and not a prediction — no water moves
+         through time, nothing has momentum, and asked for a duration this would
+         have no answer. It is a geometric statement about the surface, the same
+         category of claim as a catchment area. See static/analysis/ponding.js.
+         Under Read because it is a parameterised reading of the surface, not an
+         edit of it: nothing here moves a cell. -->
+    <!-- Sub-folded and closed (2026-08-11): Read was 2 332 px of a 4 314 px
+         column, and the analysis grid above — which is the layer selector and
+         the thing actually reached for — was being pushed off the top by two
+         blocks that are read occasionally. -->
+    <details class="sub" id="sec-rain">
+      <summary class="subhead">Rainfall</summary>
+      <div class="sec-body">
+    <div class="row">
+      <button class="tog" id="t-water"
+        title="route a rainfall event over this surface and show where it stands">Rainfall</button>
+    </div>
+    <div id="water-tools" hidden>
+      <label class="field">
+        <span>Rainfall <em id="rain-val">2.0 mm</em></span>
+        <!-- Logarithmic, 0.1–100 mm. The interesting band on this patch is
+             below 2 mm, where hollows are still partly full; a linear track
+             would put all of it in the first two steps. -->
+        <input type="range" id="rain" min="0" max="100" step="1" value="43">
+      </label>
+      <div class="row">
+        <button class="wshow on" id="w-blocks" data-wshow="blocks"
+          title="draw the standing water as blocks">Blocks</button>
+        <button class="wshow" id="w-off" data-wshow="off"
+          title="keep the numbers, hide the blocks">Numbers only</button>
+      </div>
+      <div id="water-metrics">
+        <div class="metric"><span>Rain delivered</span><b id="w-delivered">—</b></div>
+        <div class="metric"><span>Held on the surface</span><b id="w-retained">—</b></div>
+        <div class="metric"><span>Ran off the patch</span><b id="w-runoff">—</b></div>
+        <div class="metric"><span>Outfalls</span><b id="w-outfalls">—</b></div>
+        <div class="metric"><span>Soaked away</span><b id="w-infiltrated">—</b></div>
+        <div class="metric sep"><span>Share retained</span><b id="w-frac">—</b></div>
+        <div class="metric"><span>Standing water</span><b id="w-area">—</b></div>
+        <div class="metric"><span>Deepest pond</span><b id="w-max">—</b></div>
+        <div class="metric"><span>Hollows filled</span><b id="w-full">—</b></div>
+        <div class="metric sep"><span>Storage capacity</span><b id="w-capacity">—</b></div>
+        <div class="metric"><span>Event absorbed up to</span><b id="w-absorb">—</b></div>
+        <div class="metric sep"><span>Water bodies</span><b id="w-bodies">—</b></div>
+        <div class="metric"><span>Largest holds</span><b id="w-largest">—</b></div>
+        <div class="metric"><span>Median body</span><b id="w-median">—</b></div>
+      </div>
+      <!-- ⚠️ THE DISTRIBUTION, NOT ONLY THE TOTAL. "20 bodies, 6.9 m³" and
+           "2 bodies, 6.9 m³" are the same two numbers and completely different
+           ground — a wet meadow against a pond in a dry field. This is the one
+           thing the metric list above cannot say, so it is drawn. -->
+      <div class="row" id="w-chart-row">
+        <button class="wplot on" id="w-plot-rank" data-wplot="rank"
+          title="each water body as a bar, largest first — how many, and how much each holds">Ranked</button>
+        <button class="wplot" id="w-plot-scatter" data-wplot="scatter"
+          title="area against volume — whether the water is spread thin or held deep">Area · volume</button>
+      </div>
+      <canvas id="w-chart" width="560" height="300"
+        title="the water bodies this event produced"></canvas>
+      <div class="meta" id="w-chart-note"></div>
+      <div class="row">
+        <button class="tog" id="t-wpins"
+          title="label each water body on the model with what it holds">Volume pins</button>
+      </div>
+      <!-- The single number a specification can be written against. -->
+      <div class="teaching" id="water-note"></div>
+      <div class="meta">
+        Infiltration is one coefficient per substrate class, not soil physics —
+        a stated design assumption, and zero where no substrate has been
+        specified. Sub-basins inside one hollow are not resolved: the patch's
+        929 hollows average 7 litres each, so there is no interior to resolve.
+      </div>
+    </div>
+
+      </div>
+    </details>
+
+    <details class="sub" id="sec-species">
+      <summary class="subhead">Species</summary>
+      <div class="sec-body">
+    <div id="trait-table"></div>
+    <div class="teaching" id="species-note">
+      A <strong>habitat-suitability instrument</strong>, not a prediction. Each species has a
+      tolerance range per axis — moisture, energy, substrate, shelter, landform —
+      combined so that the worst axis governs. The envelopes are stated
+      assumptions, open to argument; nothing here is fitted to occurrence data
+      and no uncertainty is carried. It answers whether a gesture <em>widens or
+      narrows the range of conditions on the site</em>, not which plant will grow.
+    </div>
+      </div>
+    </details>
+    </div>
+  </details>
+
+  <!-- ══ SECTION ═════════════════════════════════════════════════════════════
+       Its own top-level group (2026-08-11), because the button was reported too
+       hidden twice while it lived inside the drawing row. Cutting one still
+       enters the locked plan view like the drawing tools do; the list and the
+       readout outlive the mode.
+
+       ⚠️ MOVED BELOW THE MODIFIERS (2026-08-12, Marc). It sat above them, on the
+       reasoning that cutting a section is a READING of the ground rather than a
+       modification — true, and the wrong way round for the way the tool is
+       actually used: you shape the ground and THEN cut a section to see what you
+       did. Above the modifiers it also sat alone, which is what made it read as
+       an orphan rather than as the start of the drawings the tool can produce. -->
+  <details class="panel" id="sec-section">
+    <summary><svg viewBox="0 0 24 24"><rect x="3" y="7" width="18" height="11" rx="1"/><line x1="12" y1="2" x2="12" y2="22" stroke-dasharray="3.5 2.5"/></svg><h2>Section</h2><span class="sec-badge" id="b-section"></span></summary>
+    <div class="sec-body">
+    <div class="row">
+      <button class="ptool" id="pt-section" data-ptool="section"
+        title="click two points on the plan to cut a section"><b>Cut section</b></button>
+    </div>
+    <div id="section-tools" hidden>
+      <ul class="list" id="section-list"></ul>
+      <div class="teaching" id="section-read"></div>
+      <div class="row">
+        <!-- The drafting fold-out: the profile rotated 90° about its own
+             trace, so a plan shows the section beside its line instead of
+             edge-on. Heights fold LEFT of the direction the section was cut
+             in — the click order chooses the side — measured from the
+             profile's lowest point. The fold carries the vertical
+             exaggeration so it is the same drawing as the standing one:
+             at 1.0× it is true size. -->
+        <button class="tog" id="t-fold-sections"
+          title="rotate each profile flat about its own line, to read in plan — true size at 1.0× exaggeration">Fold into plan</button>
+        <button id="section-clear" class="link">clear all</button>
+      </div>
+      <div class="meta">
+        Existing ground dashed and fine, proposed solid and heavy — in the
+        viewport and in the SVG export under Export.
+      </div>
+    </div>
+    </div>
+  </details>
+
+  <!-- ⚠️ CLOSED BY DEFAULT (2026-08-11), and the reason is that it is now a
+       SECOND COPY. All thirteen of these values are on the readout: eight in
+       the bottom strip, three biotic in the habitat card, and landform
+       diversity / basins / largest catchment / TWI defined folded into the
+       Landform · Hydrology card the same day. Open the menu section only to
+       read them as a list — which is why it is still here, and why its badge
+       carries H′, habitats and invasive so the headline survives the fold.
+       Leaving it open cost 314 px near the BOTTOM of a 4 600 px scrolling
+       column, which is what made the measurements look "covered". -->
+  <details class="panel" id="sec-measured">
+    <summary><h2>Measured</h2><span class="sec-badge" id="b-measured"></span></summary>
+    <div class="sec-body">
+    <div id="metrics">
+      <div class="metric"><span>Relief</span><b id="m-relief">—</b></div>
+      <div class="metric"><span>Slope mean</span><b id="m-slope">—</b></div>
+      <div class="metric"><span>Ruggedness (TRI)</span><b id="m-tri">—</b></div>
+      <div class="metric"><span>Geodiversity</span><b id="m-geo">—</b></div>
+      <div class="metric"><span>Landform diversity</span><b id="m-landform">—</b></div>
+      <div class="metric"><span>Watersheds</span><b id="m-basins">—</b></div>
+      <div class="metric"><span>Largest catchment</span><b id="m-catchment">—</b></div>
+      <div class="metric"><span>Water storage</span><b id="m-storage">—</b></div>
+      <div class="metric"><span>Hollows</span><b id="m-depr">—</b></div>
+      <div class="metric"><span>TWI defined</span><b id="m-twi">—</b></div>
+      <div class="metric sep"><span>Shannon H′</span><b id="m-shannon">—</b></div>
+      <div class="metric"><span>Habitats present</span><b id="m-richness">—</b></div>
+      <div class="metric"><span>Invasive cover</span><b id="m-invasive">—</b></div>
+    </div>
+    </div>
+  </details>
+
+  <details class="panel" id="sec-view">
+    <summary><svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><h2>Display</h2><span class="sec-badge" id="b-view"></span></summary>
+    <div class="sec-body">
+    <!-- The row is the CHOICE between the two representations; each one's own
+         settings live in the sub named after it, below. ⚠️ The dock comment
+         that stood here was stale: setInstrument stopped relocating these when
+         the readout was moved into HTML windows, and it moves nothing now. -->
+    <div class="row" id="view-rep-row">
+      <button class="rep on" id="r-mesh" data-rep="mesh">Surface</button>
+      <button class="rep" id="r-voxel" data-rep="voxel">Voxels</button>
+      <!-- NOT class="rep": that selector drives the Surface/Voxels choice and
+           reads data-rep, so a third button in the same class would silently
+           switch the terrain back to a mesh whenever vegetation was toggled. -->
+      <!-- ⚠️ HIDDEN, NOT DELETED (2026-08-10): the stem drawing was judged not
+           good enough on screen, and a biomass-as-voxels reading is under
+           discussion as its successor. stems.js, plants.js and render group
+           R9 stay — plants.js still draws the species plate — so removing the
+           button is a UI decision that costs nothing to reverse. -->
+      <button class="tog" id="t-plants" hidden
+        title="draw the assemblage as objects on the ground">Vegetation</button>
+    </div>
+    <!-- Hidden with the Vegetation toggle above — it qualifies that drawing. -->
+    <label class="check" hidden id="view-plants-check">
+      <input type="checkbox" id="plants-colour"> Colour stems by species
+    </label>
+    <div class="meta" id="plants-note" hidden></div>
+    <!-- ⚠️ THE CONTROL IS GONE, THE PLUMBING IS NOT (Marc, 2026-08-19).
+         `currentExaggeration()`, `setExaggeration()`, the overlays, the stems,
+         the voxel field and the section sheet's declared factor all still read
+         this input — the render suite has four checks on that plumbing (R4, R5,
+         R9, R12) and none of them touch this element. Hidden rather than
+         deleted so every one of those readers keeps working and there is one
+         obvious place to put the control back.
+         ⚠️ AND THE VALUE IS PINNED AT 1.0. Hiding the slider while `adoptDEM`
+         went on auto-suggesting a factor — 4.5x on the opening tile — would
+         have left the terrain silently distorted with nothing on screen saying
+         by how much, which is the exact failure the removed label existed to
+         prevent. A distortion nobody declares is worse than a distortion nobody
+         can adjust. -->
+    <label class="field" id="view-ex-field" hidden>
+      <span>Vertical exaggeration <em id="ex-val">1.0×</em></span>
+      <input type="range" id="ex" min="1" max="8" step="0.5" value="1">
+    </label>
+
+    <!-- ⚠️ ONE SUB PER REPRESENTATION (2026-08-16, Marc), each holding that
+         representation's OWN settings. The buttons above choose; these say what
+         the choice can be tuned to. It also ends a long-standing oddity: the
+         contour interval and the block size sat in one flat column with no
+         indication that each belongs to a different way of drawing the ground,
+         and only one of them was ever live. -->
+    <details class="sub" id="sec-view-surface">
+      <summary class="subhead">Surface</summary>
+      <div class="sec-body">
+      <!-- ══ CONTOURS ══════════════════════════════════════════════════════════
+           Off by default: the lattice already carries scale, and two families of
+           line work on one surface compete unless the second has been asked for.
+           The levels are exact multiples of the interval and anchored to zero, so
+           they do not slide around when the ground is edited. -->
+      <div class="row" id="view-contours-row">
+        <button class="tog" id="t-contours"
+          title="draw contour lines on the surface">Contours</button>
+        <!-- ⚠️ HIDDEN (2026-08-11): the readout now FOLLOWS THE MENU — one
+             master toggle, the chip — so a second switch here could only
+             disagree with it. The element stays because setInstrument still
+             mirrors its state for the section badge. -->
+        <button class="tog" id="t-hud" hidden
+          title="dense readout over the model, for presenting and recording">Instrument</button>
+      </div>
+      <label class="field" id="contour-field" hidden>
+        <span>Contour interval <em id="contour-val">0.5 m</em></span>
+        <!-- A discrete 1-2-5 series, not a continuous range: an interval is read
+             off the drawing and multiplied in the head, and 0.25 m is a number
+             people can count in where 0.31 m is not. -->
+        <input type="range" id="contour" min="0" max="9" step="1" value="4">
+      </label>
+      <div class="meta" id="contour-note" hidden></div>
+      </div>
+    </details>
+
+    <details class="sub" id="sec-view-voxels">
+      <summary class="subhead">Voxels</summary>
+      <div class="sec-body">
+      <label class="field" id="block-field" hidden>
+        <span>Block size <em id="block-val">1.0 m</em></span>
+        <input type="range" id="block" min="1" max="32" step="1" value="4">
+      </label>
+      <!-- ⚠️ A LAYER READ AS SIZE, NOT AS COLOUR — the viewport's version of the
+           proportional-symbol technique the grading sheet already uses. Size and
+           colour are two channels, so a block may carry wetness as tone and
+           ruggedness as bulk at once; the note below names whichever are live,
+           because two layers on one block is exactly the thing a reader can
+           misattribute.
+           ⚠️ CONTINUOUS LAYERS ONLY. The list is built in app.js from
+           RULE_LAYERS with the categorical ones excluded: scaling a block by
+           landform class would order categories that have no order, the same
+           mistake the attribute rule refuses by matching membership instead of
+           a range. -->
+      <label class="field" id="vox-size-field" hidden>
+        <span>Size by</span>
+        <select id="vox-size"><option value="">nothing — solid ground</option></select>
+      </label>
+      <label class="field" id="vox-min-field" hidden>
+        <span>Smallest block <em id="vox-min-val">15%</em></span>
+        <input type="range" id="vox-min" min="2" max="90" step="1" value="15">
+      </label>
+      <!-- ⚠️ THE SUB MUST SAY SOMETHING WHEN ITS FIELD IS HIDDEN. #block-field
+           is shown only while the voxel representation is live, so in surface
+           mode this fold would open on nothing at all and read as broken. -->
+      <div class="meta" id="voxel-note">
+        Block size is set here while <b>Voxels</b> is the representation above.
+        A block is a whole number of DEM cells, so the terrain is read as
+        volume rather than as a skin — which is what the printable solid and
+        the cut/fill blocks are built from.
+      </div>
+      <div class="meta" id="vox-size-note" hidden></div>
+      </div>
+    </details>
+
+    <!-- ⚠️ A THIRD SUB THAT IS NOT A THIRD REPRESENTATION. Surface and Voxels
+         are tabs — only one can be live, so choosing one closes the other. This
+         is an OVERLAY that stands on whichever of them is drawn, so it is a
+         peer fold that neither of them closes, and syncViewSubs deliberately
+         does not touch it. It gets its own "hide the ground" instead, which is
+         the honest way to see the attribute field alone without pretending to
+         be a representation the exporters, the water and the section face would
+         all then have to understand. -->
+    <details class="sub" id="sec-view-glyphs">
+      <summary class="subhead">Attribute glyphs</summary>
+      <div class="sec-body">
+      <div class="row">
+        <button class="tog" id="t-glyphs" title="build a line on every sampled cell from a chain of attributes">Glyph field</button>
+        <button class="tog" id="t-glyph-solo" title="hide the terrain, leaving only the attribute field">Hide the ground</button>
+      </div>
+      <!-- ⚠️ AN ORDERED LIST, NEVER SORTED — ↑ moves a row by hand and nothing
+           else moves it, the same rule the selection stack keeps. But be
+           precise about WHERE the order bites: turn and tilt are two
+           coordinates of one direction and commute with each other; what order
+           decides is where the extends fall among them (an extend above a turn
+           leaves along the old bearing, and a turn between two extends elbows
+           the glyph) and what a bend finds already drawn. This comment claimed
+           more than that until a suite row proved it wrong. -->
+      <div id="glyph-chain"></div>
+      <div class="row">
+        <button id="glyph-add" title="add a step to the chain">+ step</button>
+        <button id="glyph-reset" title="back to the opening chain">reset chain</button>
+      </div>
+      <label class="field">
+        <span>One glyph per <em id="glyph-stride-val">4 cells</em></span>
+        <input type="range" id="glyph-stride" min="1" max="24" step="1" value="4">
+      </label>
+      <label class="field">
+        <span>Length <em id="glyph-len-val">90%</em> of the spacing</span>
+        <input type="range" id="glyph-len" min="20" max="200" step="5" value="90">
+      </label>
+      <div class="meta" id="glyph-note"></div>
+      </div>
+    </details>
+
+    <!-- ⚠️ CONTEXT SITS BELOW BOTH SUBS AND STAYS AT TOP LEVEL (2026-08-16,
+         Marc). It is not a property of either representation — it is a second,
+         coarser DEM drawn around whichever one is live — so it is a peer of the
+         choice above, not a member of it. It is also used often enough that
+         burying it in a fold would cost more than the tidiness is worth.
+         ⚠️ THE DROP TARGET CAME HERE FROM IMPORT, so the backdrop arrives in
+         the same place the switch that reveals it lives. -->
+    <div class="row">
+      <button class="tog" id="t-context" title="show the 4 m national tile this patch sits inside">Context 4 m</button>
+    </div>
+    <div class="meta" id="context-note"></div>
+    <div id="dropzone-context">
+      <div class="dz" id="dz-context">
+        <strong>Drop a context</strong>
+        <span>the coarse tile it sits inside — a backdrop, never edited</span>
+      </div>
+      <span class="or">single-band float32 DEM, any CRS · or click to choose a file</span>
+    </div>
+    <input type="file" id="file-context" accept=".tif,.tiff" hidden>
+
+    <div class="meta keys">
+      <b>left-drag</b> paint · <b>middle-drag</b> orbit · <b>right-drag</b> pan<br>
+      <b>alt-drag</b> orbit · <b>shift-drag</b> pan · <b>wheel</b> zoom to cursor<br>
+      <b>double-click</b> centre here · <b>R</b> reset view
+    </div>
+    </div>
+  </details>
+
+  <details class="panel" id="sec-export">
+    <summary><svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg><h2>Export</h2><span class="sec-badge" id="b-export"></span></summary>
+    <div class="sec-body">
+    <label class="check">
+      <input type="checkbox" id="ex-apply"> Bake vertical exaggeration into the mesh
+    </label>
+    <div class="row">
+      <button id="ex-tif">Terrain · GeoTIFF</button>
+      <button id="ex-obj">Terrain · OBJ</button>
+    </div>
+    <!-- ⚠️ ONLY MEANINGFUL IN VOXELS, which is why it hides itself: the smooth
+         mesh is already one welded surface and has no blocks to union. -->
+    <div id="ex-solid-field" hidden>
+      <label class="field">
+        <span>Blocks export as</span>
+        <select id="ex-solid">
+          <option value="boxes">separate boxes — one closed box per block</option>
+          <option value="solid" selected>one watertight solid — union of the blocks</option>
+          <option value="grouped">one solid per class of the shown layer</option>
+        </select>
+      </label>
+      <div class="meta" id="ex-solid-note"></div>
+    </div>
+    <div class="row">
+      <button id="ex-layer-tif">Layer · GeoTIFF</button>
+      <button id="ex-layer-jpg">Layer · figure</button>
+    </div>
+
+    <!-- Regions and sections leave from here with everything else. They used
+         to leave from inside the plan panel, which meant the shapefile import
+         was unreachable until plan mode had been entered once. Both buttons
+         answer an empty design with a status line, not an error. -->
+    <!-- ⚠️ IMPORT LEFT THIS ROW (2026-08-13) for Selection → Import, where
+         reading polygons IN belongs. Only the writer stays here. -->
+    <div class="row">
+      <button id="plan-export"><b>Regions · shapefile ZIP</b></button>
+    </div>
+    <div class="meta" id="plan-note">
+      Shapefile (.shp/.shx/.dbf/.prj, EPSG:25833) and GeoJSON of the same
+      rings, zipped. Attributes: id, name, level_m — the datum each region was
+      told to reach, which makes the set a specification rather than a tracing.
+    </div>
+    <div class="row">
+      <button id="section-export"><b>Sections · SVG</b></button>
+      <!-- The drawing an earthworks contractor is actually given: proposed
+           contours over existing, the disturbed ground hatched, spot levels,
+           north point and a graphic scale. See static/export/grading.js. -->
+      <button id="grading-export"><b>Grading plan · SVG</b></button>
+    </div>
+    <div class="meta">
+      The section SVG is vector at a stated scale, existing ground dashed and
+      proposed solid, cut and fill hatched in opposite directions so they
+      survive greyscale. Areas are m² on the section, not volumes: the ledger
+      is the only place a volume comes from.
+    </div>
+    <!-- The grading plan's siblings — the other drawings a GIS analysis
+         becomes when someone has to act on it. See static/export/derivatives.js. -->
+    <div class="row">
+      <button id="isopach-export">Isopach · SVG</button>
+      <button id="slope-class-export">Slope classes · SVG</button>
+    </div>
+    <div class="row">
+      <button id="drainage-export">Drainage plan · SVG</button>
+      <button id="chainage-export">Chainage sections · SVG</button>
+    </div>
+    <div class="meta">
+      Isopach: equal depth of cut (dashed) and fill (solid), the limit of
+      works heavy. Slope classes: gradient bands as ratios, denser hatch is
+      steeper. Drainage: channels, divides, standing water and ranked
+      outfalls at a stated event. Chainage sections: cross-sections at even
+      stations along the guide, looking along it, areas per section.
+    </div>
+
+    <div class="row">
+      <button id="ex-all"><b>Everything · ZIP</b></button>
+    </div>
+    <div class="meta" id="export-note">
+      GeoTIFF keeps EPSG:25833 · OBJ is local, Z-up, true elevations ·
+      the figure carries its legend and units ·
+      <b>Everything</b> bundles the terrain, every layer's values and every
+      figure, with a README
+    </div>
+    </div>
+  </details>
+  </div><!-- /#menu-body -->
+  </div><!-- /#menu-main -->
+
+  <footer>
+    <span>Kartverket · NLOD</span>
+    <span id="status-foot">Phase 2</span>
+  </footer>
+</aside>
+
+<!-- ══ THE READOUT, RIGHT ═══════════════════════════════════════════════════
+     LEFT IS WHAT I CHANGE, RIGHT IS WHAT I READ, THE CENTRE IS THE GROUND
+     (Marc's rule, 2026-08-13). See DESIGN-interface-left-right.md.
+
+     ⚠️ TWO WINDOWS, AND THE SPLIT IS BY BEHAVIOUR. The figures below are
+     WATCHED WHILE WORKING — net earth moves as the brush moves — so they are
+     always open and never behind a tab. Layers and Response are CONSULTED:
+     you stop, look, and go back. One window would have put the live ledger
+     behind a tab, and a ledger you have to go and find is one you stop
+     reading.
+
+     ⚠️ THE PANELS THEMSELVES ARE MOVED HERE AT RUNTIME, not copied into this
+     markup. `sec-layers` and `sec-response` are filled by sidebar.js from the
+     existing `sec-read` and `sec-measured` subtrees. That is deliberate: this
+     project has already had a scripted structural edit eat the block next door
+     (PHASE8D §4), and `appendChild` MOVES a node with every listener, id and
+     piece of state intact — no handler to re-bind, and the layout stays
+     trivially reversible while Marc is still iterating on it. -->
+<aside id="readout">
+  <!-- ⚠️ NO FOLD BUTTON OF ITS OWN (Marc, 2026-08-13): the readout folds WITH
+       the menu, from the one control in the top-right corner. Two fold buttons
+       for two windows meant two clicks to clear the stage for a recording, and
+       a state where half the interface was hidden and half was not — which is
+       neither the working layout nor a clean frame. -->
+  <!-- ⚠️ NO TITLE (Marc, 2026-08-13). "READOUT" named a window whose four
+       sections already name themselves, and a heading that repeats what is
+       written directly beneath it is a line of ink saying nothing. The header
+       survives only as the drag handle, so it keeps a grip mark: an invisible
+       strip is a control nobody finds. -->
+  <header id="readout-head" title="drag to move">
+    <span class="grip" aria-hidden="true"></span>
+  </header>
+  <div id="readout-main">
+    <div id="readout-body">
+      <!-- ⚠️ FOUR PEERS, EACH INDEPENDENTLY ON OR OFF (Marc, 2026-08-13).
+           Measured used to be exempt from the fold on the argument that it is
+           watched while working — true, but it made one icon behave unlike the
+           other three, which is worse than the thing it protected. And with
+           Rainfall and Species standing on their own, "Response" had nothing
+           left in it, so the category is gone rather than kept as an empty
+           drawer. ⚠️ NOT an accordion either: these are readings you may want
+           side by side — the figures WITH the layer you are judging — so each
+           toggles alone. -->
+      <details class="rpanel" id="sec-numbers" open>
+        <summary><h2>Measured</h2></summary>
+        <div class="sec-body" id="numbers-body"></div>
+      </details>
+      <!-- ⚠️ THE SELECTOR LEFT THIS PANEL ON 2026-08-20 and the ramp did not.
+           Choosing which layer is drawn on the ground is a display decision and
+           now sits in Display beside Surface, Voxels and the glyph field; the
+           ramp, its stretch handles and the solar note stay here because they
+           govern a READING, which is the hard edge named in
+           DESIGN-interface-left-right.md. sidebar.js moves the grid at boot, so
+           this body is filled from the left as before, minus that one child. -->
+      <details class="rpanel" id="sec-layers">
+        <summary><h2>Terrain analysis</h2></summary>
+        <div class="sec-body" id="layers-body"></div>
+      </details>
+      <!-- Rainfall and Species are moved in here by sidebar.js, as their own
+           panels — see the note there. -->
+    </div>
+    <!-- The rail on the OUTER edge, mirroring the menu's, so the two windows
+         face each other across the ground. -->
+    <nav id="readout-rail" aria-label="readout sections">
+      <button data-rpanel="numbers" title="Measured — the figures, watched while working">
+        <svg viewBox="0 0 24 24"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+      </button>
+      <button data-rpanel="layers" title="Terrain analysis — the ramp and legend for the layer on the ground; the layer itself is chosen in Display">
+        <svg viewBox="0 0 24 24"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+      </button>
+      <!-- Feather droplet — a rainfall event settled on the surface. -->
+      <button data-rpanel="rain" title="Rainfall — route an event and see where it stands">
+        <svg viewBox="0 0 24 24"><path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/></svg>
+      </button>
+      <!-- The leaf keeps its meaning now that it names ONE thing: what the
+           ground is modelled to support. -->
+      <button data-rpanel="species" title="Species — the assemblage these conditions support">
+        <svg viewBox="0 0 24 24"><path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.5 19 2c1 2 2 4.2 2 8 0 5.5-4.8 10-10 10z"/><path d="M2 21c0-3 1.9-5.4 5.1-6C9.5 14.5 12 13 13 12"/></svg>
+      </button>
+    </nav>
+  </div>
+  <!-- ⚠️ THE DISCLAIMER SITS WITH THE NUMBERS, NOT ON THE WORDMARK (2026-08-23,
+       Marc, for the public release). The wordmark's Method popover is read once
+       when the tool is new; this has to be an arm's length from the cut/fill
+       figure it qualifies. It carries data-info, so the delegated handler that
+       already serves every layer and Measured row opens it — no new wiring, and
+       the tool cannot explain itself two ways. The visible line stays the house
+       sentence; the popover carries the full text, worded identically to the
+       repository README. -->
+  <footer id="readout-disclaimer" data-info="disclaimer"
+          title="what these numbers are, and are not">
+    A terrain analysis instrument. Not a prediction.
+  </footer>
+</aside>
+<!-- ⚠️ INLINE AND SYNCHRONOUS, ON PURPOSE. The modules below are deferred, so
+     the first paint used to show the menu UNRESTORED — every section open,
+     unfolded, at the default position — and then jump when sidebar.js caught
+     up: reported as "you can see the old menu for a moment". This runs while
+     the parser is still here, before that paint, reading the same keys
+     sidebar.js owns; sidebar.js then re-applies idempotently. -->
+<script>
+  try {
+    var _sb = document.getElementById("sidebar");
+    var _p = JSON.parse(localStorage.getItem("dl-terraindiversity.panel") || "{}");
+    if (_p.min) _sb.classList.add("min");
+    if (isFinite(_p.x) && isFinite(_p.y)) {
+      _sb.style.left = _p.x + "px"; _sb.style.top = _p.y + "px";
+    }
+    var _s = JSON.parse(localStorage.getItem("dl-terraindiversity.sections") || "null");
+    if (_s) for (var _k in _s) {
+      var _el = document.getElementById("sec-" + _k);
+      if (_el) _el.open = !!_s[_k];
+    }
+  } catch (e) { /* storage unavailable: the defaults paint, which is correct */ }
+</script>
+
+<div id="viewport">
+  <canvas id="canvas"></canvas>
+  <!-- ⚠️ A SEPARATE CANVAS, NOT DRAWN INTO THE WebGL ONE. The renderer clears
+       and redraws its buffer every frame and the capture path reads it back
+       synchronously; compositing a 2D overlay into it would either be wiped or
+       would end up baked into every exported figure. Its own canvas can be
+       switched off with no trace, which is what makes this a mode. -->
+  <canvas id="hud" hidden></canvas>
+  <div id="overlay"></div>
+  <div id="gizmo">
+    <div class="grid">
+      <button data-view="top">Top</button>
+      <button data-view="front">Front</button>
+      <button data-view="right">Right</button>
+      <button data-view="bottom">Bot</button>
+      <button data-view="back">Back</button>
+      <button data-view="left">Left</button>
+    </div>
+    <!-- ⚠️ ONE BUTTON PER SECTION THAT EXISTS, built from the list rather than
+         written here: a section is a design object the user makes, so the
+         gizmo cannot know its name in advance. Empty and hidden until the
+         first section is cut. Pressing A–A looks ALONG that section and clips
+         everything on the near side away, which is what a section drawing is;
+         pressing it again flips which side is kept, and a third press leaves. -->
+    <div class="grid sections" id="gizmo-sections" hidden></div>
+    <!-- Labelled with the DESTINATION, like every axis button above it —
+         syncProjButton keeps it naming the projection a press switches to. -->
+    <button id="proj" class="proj">Orthographic</button>
+    <!-- ⚠️ NO INSTRUMENT BUTTON ANY MORE (2026-08-11). The Menu chip is the
+         one master toggle: menu open means EVERYTHING open — the floating
+         menu and every readout card — and folded means a clean stage with
+         only the chip and this gizmo. The readout follows the fold; there is
+         nothing separate left to enter or exit. -->
+  </div>
+  <!-- The way back for a folded interface — same corner it folded from. One
+       press expands the menu AND every readout; Esc or the – button folds it
+       all away again. -->
+  <!-- ⚠️ FOLD AND UNFOLD ARE ONE CONTROL IN ONE PLACE, and both now live on the
+       VIEWPORT rather than in the menu — top right, above the gizmo, where the
+       chip therefore lands too. sidebar.js still measures the button's live
+       rect and puts the chip on it, so the pairing survives whatever CSS says.
+       ⊟ / ☰ rather than − / ☰: a minus reads as punctuation at this size, and
+       Marc asked for it to be more obvious. -->
+  <button id="menu-min" title="fold the menu away — the ☰ chip brings it back">⊟</button>
+  <button id="menu-chip" hidden title="expand the menu and all readouts">☰</button>
+  <!-- A site photograph, shown on demand from the list. -->
+  <div id="photo-view" hidden></div>
+  <div id="fps"></div>
+  <div class="hud" id="hint" hidden></div>
+  <div class="hud" id="status" hidden></div>
+  <!-- No (c) glyph next to the roundel: two different-sized circles side by
+       side read badly (Marc, 2026-08-05). The logo IS the mark; the formal
+       copyright notice lives in LICENSE, the sidebar and the page.
+       This element is SHARED with DL-TerrainSlicer, where the change was made
+       as its build 24 (commit 1ab96b4) - keep the two identical. -->
+  <a id="brandmark" href="https://digital-landscapes.com/" target="_blank" rel="noopener">
+    <img src="static/logo-dl.png" alt="">
+    <span>Digital Landscapes</span>
+  </a>
+</div>
+
+<script type="module" src="static/app.js"></script>
+<!-- After app.js: the sections script reads the controls app.js has already
+     wired, and the accordion works with no script at all — collapse is native
+     <details>. sidebar.js only remembers, badges and auto-opens. -->
+<script type="module" src="static/sidebar.js"></script>
+</body>
+</html>

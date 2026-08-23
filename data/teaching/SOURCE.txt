@@ -1,0 +1,51 @@
+Teaching tiles — SYNTHETIC. Not survey data. Not Kartverket.
+Generated 2026-08-08 for the DL-TerrainDiversity student workshop.
+
+⚠️ THESE TILES CONTAIN NO MEASUREMENT. Every cell is exactly 75.000 m. They are
+a flat plane and nothing else. They must never be described, exported or cited
+as terrain data, and they carry no Kartverket attribution because Kartverket had
+no part in them. The DEM tiles in ../orndalen/ are the real ones.
+
+WHY A FLAT PLANE IS THE STARTING POINT
+
+The tool's argument is that levelling a site is volume-neutral and destroys the
+micro-relief that differentiates habitat: on the real Ørndalen patch, Shannon H'
+falls 1.721 -> 0.000, seven species classes -> one, and the one is the invasive.
+
+A student starting on the surveyed ground has to break it before they can learn
+anything. A student starting HERE begins in the collapsed state — the flat plane
+IS the levelled result — and has to earn their way out of it by moving material
+deliberately. The first act is construction rather than destruction, every group
+starts from an identical surface so results compare directly, and no data has to
+be fetched before the tool can be opened.
+
+GEOLOCATION IS REAL EVEN THOUGH THE ELEVATIONS ARE NOT
+
+The headers are byte-for-byte the Ørndalen ones: same origins, same extents,
+same CRS. That is deliberate and it is what makes the rest of the model apply —
+the species table is calibrated for Troms, the solar geometry is computed at
+69.7 N, and the prevailing wind is the Tromsø SW. Move these tiles somewhere
+else and the biotic layer stops meaning anything.
+
+It also keeps the two-scale nest exact: the patch is 16 x 16 cells of the
+context, offset 148 east and 156 north, with no fractional alignment anywhere —
+so the context cut-out and the graded apron behave exactly as they do on the
+real tiles.
+
+  flat75_025m.tif   256x256 @ 0.25 m  = 64 m      origin 654942, 7737700
+  flat75_4m.tif     256x256 @ 4.00 m  = 1.024 km  origin 654350, 7737076
+
+  CRS       EPSG:25833 (EUREF89 UTM33N), as the real tiles
+  Values    75.000 m in every cell, float32, no nodata
+  Relief    0.000 m
+
+WHAT A PERFECT PLANE DOES TO THE ANALYSIS — expected, not broken
+
+  slope 0 everywhere · aspect has NO ANSWER anywhere (correctly NaN, not north)
+  ruggedness 0 · geodiversity 0 · one landform class
+  wetness undefined or uniform — there is no gradient for water to follow
+  no closed depressions, no storage, nothing retained from any rainfall event
+  one species class holding the whole surface, and it is the invasive
+
+Those readouts are the honest description of a plane. They are also the exact
+numbers the workshop asks students to move away from.

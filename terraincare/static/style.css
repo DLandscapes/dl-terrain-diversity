@@ -1,0 +1,175 @@
+/* DL brand pair (per digital-landscapes.com relaunch): Source Sans 3 for
+   headings/UI, Quattrocento Sans for body text. OFL-licensed, served locally. */
+@font-face {
+  font-family: "Source Sans 3";
+  src: url("fonts/SourceSans3-VariableFont_wght.ttf") format("truetype-variations");
+  font-weight: 200 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Quattrocento Sans";
+  src: url("fonts/QuattrocentoSans-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Quattrocento Sans";
+  src: url("fonts/QuattrocentoSans-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-display: swap;
+}
+
+:root {
+  --font-head: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Quattrocento Sans", "Segoe UI", system-ui, sans-serif;
+  --bg: #f4f2ee;
+  --panel: #ffffff;
+  --ink: #26241f;
+  --ink-soft: #7a766d;
+  --line: #ddd8cf;
+  --accent: #26241f;
+  --sheet: #fdfcf9;
+  --card: #d9c39a;
+  /* the viewport is the one dark surface: splats read best against it */
+  --stage: #14161a;
+  font-size: 15px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+[hidden] { display: none !important; }
+body {
+  display: flex; height: 100vh; overflow: hidden;
+  font-family: var(--font-body);
+  background: var(--bg); color: var(--ink);
+}
+
+/* ---------- sidebar ---------- */
+#sidebar {
+  width: 330px; min-width: 330px; height: 100%; overflow-y: auto; overflow-x: hidden;
+  background: var(--panel); border-right: 1px solid var(--line);
+  display: flex; flex-direction: column; gap: 14px; padding: 18px;
+}
+#sidebar header { display: flex; align-items: center; gap: 10px; }
+#logo { width: 34px; height: 34px; flex: none; }
+#sidebar header h1 { font-family: var(--font-head); font-weight: 700; font-size: 1.25rem; letter-spacing: .02em; }
+#sidebar .sub { color: var(--ink-soft); font-size: .8rem; margin-top: 2px; }
+#sidebar footer {
+  margin-top: auto; padding-top: 12px; border-top: 1px solid var(--line);
+  display: flex; justify-content: space-between;
+  color: var(--ink-soft); font-size: .74rem;
+}
+
+/* Upload area: two targets, because the tool holds two DEMs at two scales.
+   Each is dashed on its own so the pair reads as two places to drop rather
+   than as one zone with a caption. */
+#dropzone { display: flex; flex-direction: column; gap: 7px; text-align: center; }
+#dropzone .dz {
+  cursor: pointer;
+  border: 1.5px dashed var(--line); border-radius: 6px; padding: 13px 10px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+/* Only the target under the pointer lights up. A window-wide highlight would
+   say "drop anywhere" at the exact moment the user is choosing WHICH. */
+#dropzone .dz.dragover { border-color: var(--ink); background: var(--bg); }
+#dropzone .dz strong { font-size: .9rem; }
+#dropzone .dz span { color: var(--ink-soft); font-size: .78rem; }
+#dropzone > .or { color: var(--ink-soft); font-size: .72rem; }
+
+#scene-card { border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; }
+.row-between { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+#scene-name { font-size: .9rem; word-break: break-all; }
+
+/* ---------- panels ---------- */
+.panel { display: flex; flex-direction: column; gap: 9px; }
+.panel h2 {
+  font-family: var(--font-head); font-weight: 700; font-size: .78rem;
+  text-transform: uppercase; letter-spacing: .08em; color: var(--ink-soft);
+}
+.meta { color: var(--ink-soft); font-size: .78rem; line-height: 1.4; }
+.meta.keys { font-size: .74rem; }
+.meta.keys b { color: var(--ink); font-weight: 700; }
+
+.row { display: flex; gap: 8px; }
+.row > * { flex: 1; }
+
+button {
+  font: inherit; font-size: .82rem; cursor: pointer;
+  padding: 7px 10px; border-radius: 6px;
+  border: 1px solid var(--line); background: var(--sheet); color: var(--ink);
+}
+button:hover { border-color: var(--ink-soft); }
+button.toggle.on, button.tool.on { background: var(--ink); border-color: var(--ink); color: var(--sheet); }
+button.link {
+  border: none; background: none; padding: 0;
+  color: var(--ink-soft); font-size: .76rem; text-decoration: underline;
+}
+button.link:hover { color: var(--ink); }
+button:disabled { opacity: .45; cursor: default; }
+
+.field { display: flex; flex-direction: column; gap: 4px; font-size: .8rem; }
+.field > span { display: flex; justify-content: space-between; color: var(--ink-soft); }
+.field em { font-style: normal; color: var(--ink); font-variant-numeric: tabular-nums; }
+.check { display: flex; align-items: center; gap: 7px; font-size: .8rem; color: var(--ink-soft); }
+input[type=range] { width: 100%; accent-color: var(--ink); }
+select {
+  font: inherit; font-size: .82rem; padding: 6px 8px;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--sheet); color: var(--ink);
+}
+
+.list { list-style: none; display: flex; flex-direction: column; gap: 5px; }
+.list li {
+  display: flex; align-items: center; gap: 8px;
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px;
+  font-size: .8rem;
+}
+.list li .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.list li .val { font-variant-numeric: tabular-nums; color: var(--ink-soft); }
+.list li button { padding: 2px 6px; font-size: .72rem; }
+.list:empty { display: none; }
+
+/* ---------- viewport ---------- */
+#viewport { position: relative; flex: 1; background: var(--stage); }
+#canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+#overlay { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+
+/* measurement + annotation markers, projected each frame */
+.marker {
+  position: absolute; transform: translate(-50%, -50%);
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--sheet); border: 2px solid var(--ink);
+  box-shadow: 0 0 0 1px rgba(255,255,255,.5);
+}
+.label {
+  position: absolute; transform: translate(-50%, -140%);
+  background: var(--sheet); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 5px;
+  padding: 3px 7px; font-size: .76rem; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 1px 4px rgba(0,0,0,.25);
+}
+.label.note { transform: translate(-50%, -160%); pointer-events: auto; max-width: 220px; white-space: normal; }
+.label.note b { display: block; font-family: var(--font-head); }
+#overlay svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+#overlay svg polyline, #overlay svg polygon { fill: rgba(217,195,154,.25); stroke: #fdfcf9; stroke-width: 1.5; }
+
+.hud {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  background: rgba(38,36,31,.9); color: #fdfcf9;
+  border-radius: 6px; padding: 7px 13px; font-size: .8rem;
+  pointer-events: none;
+}
+#hint { top: 16px; }
+#status { bottom: 16px; }
+
+#dropveil {
+  position: absolute; inset: 0; display: none;
+  align-items: center; justify-content: center;
+  background: rgba(20,22,26,.8); border: 3px dashed var(--card);
+  color: var(--sheet); font-family: var(--font-head); font-size: 1.1rem;
+}
+#dropveil.on { display: flex; }
+
+@media (max-width: 760px) {
+  body { flex-direction: column; }
+  #sidebar { width: 100%; min-width: 0; height: auto; max-height: 46vh; border-right: none; border-bottom: 1px solid var(--line); }
+  #viewport { flex: 1; min-height: 0; }
+}

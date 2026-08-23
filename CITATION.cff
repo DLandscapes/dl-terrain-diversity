@@ -1,0 +1,92 @@
+# Citation metadata. GitHub renders this into a "Cite this repository" button
+# with ready-to-paste BibTeX — which is the difference between someone meaning
+# to cite the tool and actually doing it.
+#
+# ⚠️ ONE FIELD IS STILL OUTSTANDING: the DOI. It is OMITTED rather than carried
+#    as a placeholder, because a CITATION.cff with a dead DOI is worse than one
+#    with no DOI at all — see the note further down where it belongs.
+#    `repository-code` was filled on 2026-08-23, once the repository existed.
+cff-version: 1.2.0
+title: "DL-TerrainDiversity"
+message: "If you use this software, please cite it using these metadata."
+type: software
+authors:
+  - family-names: Ihle
+    given-names: Marc-Eduard
+    affiliation: "Digital Landscapes"
+    # Affiliation is Digital Landscapes, not UiT: the instrument was developed
+    # independently of the university and is applied there in teaching. See the
+    # Software availability statement in the ECLAS 2026 extended abstract.
+abstract: >-
+  A Terrain Design Information Model (TDIM) for landscape architecture: the
+  ground is held as a model the designer works with, from which the drawings —
+  grading plan, chainage sections, cut/fill isopach, slope-class and drainage
+  plans, GIS rasters — are derived rather than drawn. A model of terrain is a
+  DTM; the design is the distinction. It couples a design gesture to its
+  ecological consequence in one loop — terrain metrics answered in the same
+  frame as the hand, hydrological derivatives within about thirty milliseconds,
+  and radiation, shelter and landform on settling — and translates the resulting
+  abiotic conditions into a modelled species assemblage. Built to test a single
+  claim: that the relief which differentiates habitat falls below the resolution
+  of national terrain and soil data, and therefore has to be designed and
+  specified rather than surveyed. Runs in a browser with no installation, no
+  build step and no dependencies; exports GIS-grade rasters, meshes, polygons
+  and a full provenance record. It remains a terrain analysis instrument, not a
+  prediction.
+keywords:
+  - terrain design information model
+  - TDIM
+  - landscape architecture
+  - digital terrain analysis
+  - geomorphometry
+  - geodiversity
+  - habitat suitability
+  - earthworks
+  - cut and fill
+  - grading plan
+  - post-industrial landscape
+license: Apache-2.0
+repository-code: "https://github.com/DLandscapes/dl-terrain-diversity"
+url: "https://digital-landscapes.com/"
+version: "0.11.0"
+date-released: "2026-08-23"
+# doi: ADDED AT RELEASE TAGGING, NOT BEFORE. A CITATION.cff with a dead DOI is
+#      worse than none, so the field is OMITTED rather than carrying a
+#      placeholder. Reserve the DOI on Zenodo, paste it in as
+#        doi: "10.5281/zenodo.NNNNNNN"
+#      commit that, and only then tag v0.11.0 — so the archived snapshot
+#      correctly contains its own identifier.
+references:
+  # ⚠️ THE METHOD'S OWN PRIOR PUBLICATION, AND THE DATE IS THE POINT. TDIM was
+  # defined here, on Digital Landscapes' own site, on 23 April 2018 — under an
+  # Innsbruck affiliation and four years before any UiT involvement. Carrying it
+  # in the citation metadata makes the lineage machine-readable rather than a
+  # claim in a README.
+  - type: blog
+    title: "TDIM Analysis from Case Study Festvåg — digital Terrain Design Information Model"
+    authors:
+      - family-names: Ihle
+        given-names: Marc-Eduard
+        affiliation: "University of Innsbruck, Institute of Experimental Architecture"
+    url: "https://digital-landscapes.com/2018/04/23/digital-terrain-design-information-model/"
+    year: 2018
+    month: 4
+    notes: >-
+      Defines the Terrain Design Information Model. Multiscale integration of UAV
+      survey with Kartverket open geodata; partners Grid-IT and Kartverket. A
+      companion study applies the model on Svalbard.
+  - type: conference-paper
+    title: >-
+      Digital Terrain Analysis as an Interface of Care: Revealing Morphological
+      Complexity to Support Ecological Diversity
+    authors:
+      - family-names: Ihle
+        given-names: Marc-Eduard
+        affiliation: "UiT The Arctic University of Norway"
+    conference:
+      name: >-
+        ECLAS 2026 — Take Care: Planetary Landscape Architecture
+    location:
+      name: "TU Delft, Delft, Netherlands"
+    year: 2026
+    month: 9

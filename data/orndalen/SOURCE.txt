@@ -1,0 +1,25 @@
+Ørndalen DEM test tiles — ECLAS 2026 poster project
+Fetched 2026-07-30 from Kartverket hoydedata.no ArcGIS ImageServer.
+
+Source:   https://hoydedata.no/arcgis/rest/services/Prosjekt_DTM/ImageServer/exportImage
+Epoch:    Tromsøya 10pkt 2024 (mosaicRule AARSTALL=2024), last flight 2024-08-07, 10 pt/m²
+CRS:      EPSG:25833 (EUREF89 UTM33N), vertical datum NN2000 (EPSG:5941)
+Licence:  NLOD / CC BY 4.0 — attribute Kartverket
+Method:   interpolation=RSP_BilinearInterpolation, pixelType=F32
+
+orndalen_2024_4m.tif    bbox 654350,7737076,655374,7738100  256x256 @ 4.00 m  (site context, 1.02 km)
+                        z 7.14 - 158.97 m (relief 151.8 m; max = Tromsøyvarden 159 m)
+                        22.8% of cells slope <4 deg; slope mean 12.3 deg
+
+orndalen_fill_025m.tif  bbox 654942,7737700,655006,7737764   256x256 @ 0.25 m  (fill-floor patch, 64 m)
+                        z 75.85 - 81.16 m (relief 5.31 m); slope mean 6.1 deg
+                        TRI mean 0.036 m; 1131 local minima in 4096 m2
+                        Located as the flattest 64 m window in the documented 50-110 m fill-floor band.
+
+orndalen_check.png            hillshade | slope | TRI  of the 4 m context tile
+orndalen_fill_hillshade.png   hillshade of the 0.25 m fill-floor patch
+
+Site reference: Ørndalen, N Tromsøya. 69.70084 N, 19.00224 E = E 654 862, N 7 737 588 (EPSG:25833).
+Former hard-rock quarry -> municipal landfill, closed September 1997, not engineered-capped.
+Five LiDAR epochs available over this AOI: 2006, 2014, 2019, 2022, 2024 — all EPSG:25833 + NN2000.
+See input/morphos_project_report.txt for full site documentation and data-route notes.
