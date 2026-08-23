@@ -1045,10 +1045,28 @@ export async function runSuite(fetchTile) {
       "quantise in any single-precision CAD viewport, the same trap as §float32",
       `< ${dem.ncols * dem.cell} m`, `${maxXY.toFixed(2)} m`,
       maxXY < dem.ncols * dem.cell + 1);
-    add(K, "…and states the world origin so it can be georeferenced again",
-      `origin_epsg25833 ${dem.originX} ${dem.originY}`,
-      lines.find((l) => l.startsWith("# origin_epsg25833")) || "(missing)",
-      obj.includes(`# origin_epsg25833 ${dem.originX} ${dem.originY}`));
+    // ⚠️ `edited` is built in the suite, not loaded from a file, so it has NO
+    // declared CRS — and the honest token for that is origin_local. This check
+    // asserted `origin_epsg25833` and passed, because the exporter used to
+    // write that string unconditionally. It was pinning the wrong behaviour:
+    // an OBJ from any terrain claimed this tool's home datum in the very line a
+    // reader uses to georeference the mesh.
+    add(K, "…and states the world origin so it can be georeferenced again — "
+      + "as origin_local when the source declared no CRS, because the origin is "
+      + "real even when its system is unstated",
+      `origin_local ${dem.originX} ${dem.originY}`,
+      lines.find((l) => l.startsWith("# origin_")) || "(missing)",
+      obj.includes(`# origin_local ${dem.originX} ${dem.originY}`));
+
+    // …and the paired case: a DEM that DOES know its CRS names it in the token.
+    {
+      const geo = DEM.fromRaw(loadGeoTIFF(await fetchTile("orndalen_fill_025m.tif"), { name: "objcrs" }));
+      const o2 = writeOBJ(geo, { exaggeration: 1 }).obj;
+      add(K, "…and names the real EPSG when the source file declared one",
+        `origin_epsg${geo.epsg}`,
+        (o2.split("\n").find((l) => l.startsWith("# origin_")) || "(missing)").split(" ")[1],
+        o2.includes(`# origin_epsg${geo.epsg} ${geo.originX} ${geo.originY}`));
+    }
     add(K, "…declares its up-axis, which OBJ itself cannot express",
       "up_axis Z", obj.includes("# up_axis Z") ? "up_axis Z" : "(missing)",
       obj.includes("# up_axis Z"));
@@ -2206,13 +2224,28 @@ export async function runSuite(fetchTile) {
         "outer CCW, inner CW", `${outerCCW} / ${innerCW}`, outerCCW && innerCW);
       add(Q, "…and it carries the attributes verbatim, so the shapefile's table and " +
         "the GeoJSON's properties are the same record",
-        "id 1, level 78, EPSG:25833",
+        "id 1, level 78",
         `id ${gj.features[0].properties.id}, ` +
-        `level ${gj.features[0].properties.level_m_above_datum}, ` +
-        `${gj.crs.properties.name.split("::").pop()}`,
+        `level ${gj.features[0].properties.level_m_above_datum}`,
         gj.features.length === 2 && gj.features[0].properties.id === 1 &&
-        gj.features[0].properties.level_m_above_datum === 78 &&
-        gj.crs.properties.name.endsWith("25833"));
+        gj.features[0].properties.level_m_above_datum === 78);
+
+      // ⚠️⚠️ THIS CHECK USED TO ASSERT THE DEFECT. It called writeGeoJSON with
+      // no CRS and then required the output to say EPSG:25833 — which is
+      // precisely the behaviour that stamped this tool's home coordinate system
+      // onto geometry from anywhere on Earth. The test passed for a year and
+      // the export was wrong the whole time. A test that pins the wrong
+      // behaviour is worse than no test, because it defends it.
+      add(Q, "given NO CRS, the GeoJSON names none — RFC 7946 reads an absent "
+        + "member as WGS 84, and inventing a different one would be a wrong "
+        + "answer rather than a missing one",
+        "no crs member", gj.crs === undefined ? "absent" : JSON.stringify(gj.crs),
+        gj.crs === undefined);
+
+      const gj2 = JSON.parse(writeGeoJSON(features, { crs: "EPSG:32633" }));
+      add(Q, "…and given one, it carries THAT one — not this tool's own",
+        "EPSG::32633", String(gj2.crs?.properties?.name ?? "absent"),
+        !!gj2.crs && gj2.crs.properties.name.endsWith("32633"));
     }
 
     {
@@ -6884,6 +6917,66 @@ export async function runSuite(fetchTile) {
         "NaN preserved", Number.isNaN(z[5]) ? "NaN" : String(z[5]),
         Number.isNaN(z[5]));
     }
+  }
+
+  // ── W2 · the CRS is READ, never assumed ──────────────────────────────────
+  // ⚠️ THIS GROUP EXISTS BECAUSE THE TOOL USED TO INVENT A DATUM. Until
+  // 2026-08-23 "EPSG:25833" was a literal in twelve places, and writeGeoTIFF
+  // defaulted to it — so a raster imported from anywhere else was WRITTEN BACK
+  // OUT declaring ETRS89 / UTM 33N in its own GeoKeys. Being calibrated for one
+  // region is a limit worth stating. Silently relabelling somebody's coordinate
+  // system is a corrupt file, and no amount of correct arithmetic upstream
+  // makes up for it.
+  {
+    const W2 = "W2 · the coordinate system is read from the file, never assumed";
+    const raw = loadGeoTIFF(await fetchTile("orndalen_fill_025m.tif"), { name: "crs" });
+    const dem = DEM.fromRaw(raw);
+
+    add(W2, "the EPSG comes out of the file's own GeoKeyDirectory, not a constant",
+      "EPSG:25833", String(raw.crs), raw.crs === "EPSG:25833");
+    add(W2, "…and reaches the DEM the rest of the tool reads",
+      "25833", String(dem.epsg), dem.epsg === 25833);
+
+    // The latitude the sun is computed at. Checked against the SITE RECORD,
+    // not against this function's own output — data/orndalen/SOURCE.txt gives
+    // 69.70084 N, and a mean-meridian approximation should land inside 0.15°.
+    const lat = dem.approxLatitudeDeg();
+    add(W2, "latitude is DERIVED from the georeference, within 0.15° of the "
+      + "site record's 69.70084 °N", "69.70 ± 0.15", f4(lat), near(lat, 69.70084, 0.15));
+
+    // ⚠️ A CONTROL. If this returned a latitude for a DEM with no CRS, the
+    // check above would be passing on a coincidence rather than on derivation.
+    const noCRS = new DEM(dem.z, dem.nrows, dem.ncols, dem.cell, dem.originX, dem.originY, "no-crs");
+    add(W2, "…and is NULL when the file declared no CRS, rather than falling "
+      + "back to the site this tool was built on",
+      "null", String(noCRS.approxLatitudeDeg()), noCRS.approxLatitudeDeg() === null);
+
+    // The writer. Round-trip what it produces through the reader, because what
+    // matters is what a DOWNSTREAM GIS would believe, not what we intended.
+    const withEPSG = loadGeoTIFF(writeGeoTIFF(
+      dem.z, dem.nrows, dem.ncols, dem.cell, dem.originX, dem.originY,
+      { epsg: dem.epsg }).buffer, { name: "rt" });
+    add(W2, "a written GeoTIFF carries the CRS it was GIVEN, read back out of it",
+      "EPSG:25833", String(withEPSG.crs), withEPSG.crs === "EPSG:25833");
+
+    const other = loadGeoTIFF(writeGeoTIFF(
+      dem.z, dem.nrows, dem.ncols, dem.cell, dem.originX, dem.originY,
+      { epsg: 32633 }).buffer, { name: "rt2" });
+    add(W2, "…including one that is NOT this tool's home CRS — the proof it is "
+      + "carried rather than hard-coded",
+      "EPSG:32633", String(other.crs), other.crs === "EPSG:32633");
+
+    // ⚠️⚠️ THE ONE THAT MATTERS MOST. With no CRS to declare, the file must say
+    // "user-defined" (32767) — the GeoTIFF spec's way of stating that no
+    // registered code applies. It must NOT quietly claim 25833.
+    const none = loadGeoTIFF(writeGeoTIFF(
+      dem.z, dem.nrows, dem.ncols, dem.cell, dem.originX, dem.originY).buffer,
+      { name: "rt3" });
+    add(W2, "with no CRS given, the file declares USER-DEFINED and claims no "
+      + "EPSG at all",
+      "no CRS", String(none.crs), none.crs === null);
+    add(W2, "…and specifically does not claim this tool's own home CRS",
+      "not EPSG:25833", String(none.crs), none.crs !== "EPSG:25833");
   }
 
   // Performance was measured at the top, on a clean heap. Reported last.

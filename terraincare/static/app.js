@@ -3040,9 +3040,10 @@ async function importPlanShapefile(files) {
   if (parsed.skipped) bits.push(`${parsed.skipped} non-polygon record(s) skipped`);
   if (hit.fraction < 0.5) {
     bits.push(`⚠️ only ${(100 * hit.fraction).toFixed(0)}% of their vertices land on this `
-      + `terrain — ${epsg && epsg !== 25833 ? `the .prj says EPSG:${epsg}, the terrain is 25833`
+      + `terrain — ${epsg && state.dem?.epsg && epsg !== state.dem.epsg
+        ? `the .prj says EPSG:${epsg}, the terrain is EPSG:${state.dem.epsg}`
         : "check the coordinate system"}. Nothing was reprojected.`);
-  } else if (epsg && epsg !== 25833) {
+  } else if (epsg && state.dem?.epsg && epsg !== state.dem.epsg) {
     bits.push(`⚠️ the .prj says EPSG:${epsg}; nothing was reprojected`);
   }
   status(bits.join(" · "), 9000);
@@ -3052,15 +3053,21 @@ function exportPlan() {
   const regions = state.plan.set.regions;
   if (!regions.length) { status("no regions to export", 3000); return; }
   const features = toFeatures(regions);
-  const { shp, shx, dbf, prj } = writeShapefile(features, { fields: PLAN_FIELDS });
-  const geojson = writeGeoJSON(features);
+  // ⚠️ THE CRS TRAVELS FROM THE TERRAIN, and only a KNOWN one is written. See
+  // the notes in shapefile.js: a .prj is not a label, it is what a reader uses
+  // to place the geometry, so a wrong one puts the drawing in the wrong
+  // country. When it is unknown the .prj is simply absent, which every GIS
+  // reads as "unstated" and handles by asking.
+  const epsg = state.dem?.epsg ?? null;
+  const { shp, shx, dbf, prj } = writeShapefile(features, { fields: PLAN_FIELDS, epsg });
+  const geojson = writeGeoJSON(features, { crs: crsOf() === "CRS not declared" ? null : crsOf() });
   const stem = exportStem("regions");
   const enc = new TextEncoder();
   const zip = makeZip([
     { name: `${stem}.shp`, data: shp },
     { name: `${stem}.shx`, data: shx },
     { name: `${stem}.dbf`, data: dbf },
-    { name: `${stem}.prj`, data: enc.encode(prj) },
+    ...(prj ? [{ name: `${stem}.prj`, data: enc.encode(prj) }] : []),
     { name: `${stem}.geojson`, data: enc.encode(geojson) },
     { name: "README.txt", data: enc.encode(planReadme(regions)) },
   ]);
@@ -3081,7 +3088,7 @@ function planReadme(regions) {
   L.push("FILES");
   L.push("-".repeat(60));
   L.push("  .shp .shx .dbf .prj   one shapefile. All four are needed; the .prj");
-  L.push("                        is EPSG:25833 and without it a reader guesses.");
+  L.push("                        comes from the source file; without it a reader guesses.");
   L.push("  .geojson              the same rings, for anything that prefers it.");
   L.push("");
   L.push("ATTRIBUTES");
@@ -6466,7 +6473,7 @@ function hudMetrics() {
     // and NOWHERE ELSE. The teaching tiles are synthetic (their SOURCE.txt
     // says Kartverket had no part in them) and a dropped DEM is the user's;
     // crediting either would misattribute.
-    crs: `EPSG:25833 · NN2000${/orndalen/i.test(state.dem.name || "")
+    crs: `${crsOf()}${/orndalen/i.test(state.dem.name || "")
       ? " · © KARTVERKET NLOD" : ""}`,
     indices,
     hyps, rose, slopeHist, slopeMax,
@@ -6989,7 +6996,7 @@ $("section-export").addEventListener("click", () => {
   const svg = sectionSVG(cut, {
     exaggeration: currentExaggeration(),
     site: state.dem ? state.dem.name : "",
-    crs: "EPSG:25833",
+    crs: crsOf(),
     behind: cut.map((s) => behindProfiles(s)),
     plan: cut.map((s) => sectionPlanBand(s)),
   });
@@ -7007,7 +7014,7 @@ $("grading-export").addEventListener("click", () => {
     baseline: state.baseZ,
     interval: state.contours.interval,
     site: state.dem.name,
-    crs: "EPSG:25833",
+    crs: crsOf(),
     regions: state.plan.set.regions.map((r) => r.rings),
     guide: guide.pts.length > 1 ? guide.pts : null,
   });
@@ -7023,7 +7030,7 @@ $("isopach-export").addEventListener("click", () => {
   if (!state.dem) { status("load a site first", 3000); return; }
   const svg = isopachSVG(state.dem, {
     baseline: state.baseZ,   // the survey, not the last undo — as the grading plan
-    site: state.dem.name, crs: "EPSG:25833",
+    site: state.dem.name, crs: crsOf(),
   });
   download(new Blob([svg], { type: "image/svg+xml" }), exportStem("isopach") + ".svg");
   status("isopach exported · cut dashed, fill solid, limit of works heavy", 4000);
@@ -7031,7 +7038,7 @@ $("isopach-export").addEventListener("click", () => {
 
 $("slope-class-export").addEventListener("click", () => {
   if (!state.dem) { status("load a site first", 3000); return; }
-  const svg = slopeClassSVG(state.dem, { site: state.dem.name, crs: "EPSG:25833" });
+  const svg = slopeClassSVG(state.dem, { site: state.dem.name, crs: crsOf() });
   download(new Blob([svg], { type: "image/svg+xml" }), exportStem("slope-classes") + ".svg");
   status("slope classes exported · denser hatch is steeper, paper is to 1:20", 4000);
 });
@@ -7042,7 +7049,7 @@ $("drainage-export").addEventListener("click", () => {
   // agrees with the water standing in the viewport; otherwise the stated
   // default. Either way the subtitle prints the figure it used.
   const svg = drainageSVG(state.dem, {
-    site: state.dem.name, crs: "EPSG:25833",
+    site: state.dem.name, crs: crsOf(),
     rainM: state.water.on ? state.water.rain : undefined,
     substrate: state.substrate,
   });
@@ -7058,7 +7065,7 @@ $("chainage-export").addEventListener("click", () => {
   }
   const svg = chainageSectionsSVG(state.dem, guide.pts, {
     baseline: state.baseZ,
-    site: state.dem.name, crs: "EPSG:25833",
+    site: state.dem.name, crs: crsOf(),
   });
   download(new Blob([svg], { type: "image/svg+xml" }), exportStem("chainage-sections") + ".svg");
   status("chainage sections exported · looking along the chainage, areas per section", 4000);
@@ -7267,9 +7274,9 @@ function layerTitle(k) {
 function exportTerrainGeoTIFF() {
   const dem = state.dem;
   if (!dem) return;
-  const bytes = writeGeoTIFF(dem.z, dem.nrows, dem.ncols, dem.cell, dem.originX, dem.originY);
+  const bytes = writeGeoTIFF(dem.z, dem.nrows, dem.ncols, dem.cell, dem.originX, dem.originY, { epsg: dem.epsg });
   download(new Blob([bytes], { type: "image/tiff" }), `${exportStem("terrain")}.tif`);
-  status(`GeoTIFF exported · ${dem.ncols}×${dem.nrows} @ ${dem.cell} m · EPSG:25833`);
+  status(`GeoTIFF exported · ${dem.ncols}×${dem.nrows} @ ${dem.cell} m · ${crsOf(dem)}`);
 }
 
 /**
@@ -7349,7 +7356,7 @@ async function exportLayerGeoTIFF() {
     const grids = await state.analysis.grids();
     const grid = grids[key];
     if (!grid) { status(`${layerTitle(key)} has no grid to export`, 4000); return; }
-    const bytes = writeGeoTIFF(grid, dem.nrows, dem.ncols, dem.cell, dem.originX, dem.originY);
+    const bytes = writeGeoTIFF(grid, dem.nrows, dem.ncols, dem.cell, dem.originX, dem.originY, { epsg: dem.epsg });
     download(new Blob([bytes], { type: "image/tiff" }), `${exportStem(key)}.tif`);
     status(`${layerTitle(key)} exported as float32 GeoTIFF · values, not colours`);
   } catch (err) {
@@ -7395,6 +7402,39 @@ function figureMetrics() {
  * layer happened to be last.
  * @returns {HTMLCanvasElement|null}
  */
+/**
+ * The coordinate system to print or write, TAKEN FROM THE FILE.
+ *
+ * ⚠️⚠️ ONE PLACE, BECAUSE THERE USED TO BE TWELVE (2026-08-23). "EPSG:25833"
+ * was written as a literal into the readout, the figure caption, the derivative
+ * sheets, the shapefile and GeoJSON exports and the provenance record — so
+ * terrain imported from anywhere else was relabelled with the coordinate system
+ * of the site this tool happens to have been developed on. Being calibrated for
+ * one region is a limit worth stating; asserting somebody else's CRS is a
+ * falsehood, and it travelled into exported files.
+ *
+ * ⚠️ RETURNS "CRS not declared" RATHER THAN A DEFAULT. If the source file
+ * carried no GeoKeys the honest answer is that nobody knows, and a reader who
+ * sees that will go and find out. A reader shown a plausible wrong code will
+ * not.
+ * @param {{crs?: string|null}|null} [dem]
+ */
+function crsOf(dem = state.dem) {
+  return (dem && dem.crs) || "CRS not declared";
+}
+
+/**
+ * The latitude the sun is computed at, and where it came from.
+ * ⚠️ The DEM's own georeference when it can be derived, and only then the
+ * development site's. Before this every raster on Earth was lit at 69.7 °N.
+ * @returns {{deg: number, derived: boolean}}
+ */
+function solarLatitude(dem = state.dem) {
+  const d = dem && typeof dem.approxLatitudeDeg === "function"
+    ? dem.approxLatitudeDeg() : null;
+  return d === null ? { deg: 69.70084, derived: false } : { deg: d, derived: true };
+}
+
 function buildFigure(key) {
   const dem = state.dem;
   if (!dem || !key) return null;
@@ -7513,7 +7553,7 @@ function buildFigure(key) {
       : key === "aspect"
         ? "Flat ground has no aspect and renders as the nodata tone, never as north."
         : "Stretched to the percentiles shown; the domain is the data's, not a nominal range.",
-    siteLine: `Ørndalen, Tromsø · EPSG:25833 / NN2000 · ${dem.ncols}×${dem.nrows} cells `
+    siteLine: `${dem.name || "unnamed raster"} · ${crsOf(dem)} · ${dem.ncols}×${dem.nrows} cells `
       + `at ${dem.cell} m · elevation ${lo.toFixed(2)}–${hi.toFixed(2)} m · `
       + new Date().toISOString().slice(0, 10),
     metrics: figureMetrics(),
@@ -7567,7 +7607,7 @@ async function exportEverything() {
     // 1. The terrain itself, as a raster and as a mesh.
     files.push({
       name: "terrain/terrain.tif",
-      data: writeGeoTIFF(dem.z, dem.nrows, dem.ncols, dem.cell, dem.originX, dem.originY),
+      data: writeGeoTIFF(dem.z, dem.nrows, dem.ncols, dem.cell, dem.originX, dem.originY, { epsg: dem.epsg }),
     });
 
     const ex = exportExaggeration();
@@ -7612,7 +7652,7 @@ async function exportEverything() {
       if (grids[k]) {
         files.push({
           name: `analysis/${k}.tif`,
-          data: writeGeoTIFF(grids[k], dem.nrows, dem.ncols, dem.cell, dem.originX, dem.originY),
+          data: writeGeoTIFF(grids[k], dem.nrows, dem.ncols, dem.cell, dem.originX, dem.originY, { epsg: dem.epsg }),
         });
       }
       const cv = buildFigure(k);
@@ -7632,7 +7672,7 @@ async function exportEverything() {
     for (const s of cuts) {
       const svg = sectionSVG([s], {
         exaggeration: currentExaggeration(),
-        site: dem.name, crs: "EPSG:25833",
+        site: dem.name, crs: crsOf(),
         behind: [behindProfiles(s)],
         plan: [sectionPlanBand(s)],
       });
@@ -7665,8 +7705,7 @@ function bundleReadme(layers, triangles, voxelTris, ex, textureFile) {
   L.push("");
   L.push(`Exported   ${new Date().toISOString().slice(0, 19).replace("T", " ")}`);
   L.push(`Source     ${dem.name}`);
-  L.push(`Site       Ørndalen, northern Tromsøya, Tromsø, Norway`);
-  L.push(`CRS        EPSG:25833 (ETRS89 / UTM 33N), vertical datum NN2000`);
+  L.push(`CRS        ${crsOf(dem)}`);
   L.push(`Grid       ${dem.ncols} x ${dem.nrows} cells at ${dem.cell} m`);
   L.push(`Extent     E ${dem.originX} – ${dem.originX + dem.ncols * dem.cell}, ` +
          `N ${dem.originY} – ${dem.originY + dem.nrows * dem.cell}`);

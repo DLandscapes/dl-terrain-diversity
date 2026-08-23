@@ -250,8 +250,14 @@ export function writeVoxelSolidOBJ(dem, opts) {
   out.push("# Interior faces are never emitted and vertices are welded, so this is one");
   out.push("# closed 2-manifold shell per object — sliceable without repair.");
   out.push(`# base plate at ${(baseZ * ex).toFixed(4)} (local Z); the solid stands on it`);
-  out.push("# COORDINATES ARE LOCAL: add the origin below to place this in EPSG:25833.");
-  out.push(`# origin_epsg25833 ${dem.originX} ${dem.originY}`);
+  // ⚠️ THE CRS NAMED HERE IS THE DEM'S OWN. It was the literal
+  // "EPSG:25833", so an OBJ exported from terrain anywhere else told the
+  // reader to place it using this tool's home datum — and these two lines
+  // are exactly what a reader USES to georeference the mesh. When the CRS
+  // is unknown the token becomes origin_local, which states that the
+  // origin is real but its system is not declared.
+  out.push(`# COORDINATES ARE LOCAL: add the origin below to place this in ${dem.crs || "the source file's own coordinate system"}.`);
+  out.push(`# origin_${dem.epsg ? `epsg${dem.epsg}` : "local"} ${dem.originX} ${dem.originY}`);
   out.push("# up_axis Z");
   out.push(ex === 1
     ? "# vertical_exaggeration 1 (true elevations, NN2000)"

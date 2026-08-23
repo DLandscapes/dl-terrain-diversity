@@ -70,12 +70,16 @@ export const INFO = {
   },
 
   // ── analysis layers ──────────────────────────────────────────────────────
+  // ⚠️ THE DATUM IS THE SOURCE FILE'S, NOT A NAMED ONE. This said "the vertical
+  // datum (NN2000)" and sourced itself to "Kartverket lidar DEM · EPSG:25833",
+  // which is true of the tiles shipped with the tool and false of every raster
+  // anyone else loads — and this popover is shown over whatever is on screen.
   elevation: {
     t: "Elevation",
-    b: "Height above the vertical datum (NN2000), the measured quantity every "
-      + "other layer is derived from. Stretched to this site's own range — an "
-      + "elevation ramp has no universal domain.",
-    s: "Kartverket lidar DEM · EPSG:25833 / NN2000",
+    b: "Height above the source raster's own vertical datum, the measured "
+      + "quantity every other layer is derived from. Stretched to this site's "
+      + "own range — an elevation ramp has no universal domain.",
+    s: "the loaded raster; its CRS is reported in the readout",
   },
   slope: {
     t: "Slope",

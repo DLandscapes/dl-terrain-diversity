@@ -140,16 +140,25 @@ export function writeShapefile(features, opts = {}) {
     shp: new Uint8Array(shp),
     shx: new Uint8Array(shx),
     dbf: writeDBF(features, fields),
-    // EPSG:25833. Written out rather than fetched: the project parses no CRS
-    // anywhere, so this is the ONE place a projection is asserted, and it must
-    // match the DEM the polygons were drawn on.
-    prj: opts.wkt ?? 'PROJCS["ETRS89 / UTM zone 33N",GEOGCS["ETRS89",'
+    // ⚠️⚠️ THE .prj IS WRITTEN ONLY WHEN THE CRS IS ACTUALLY KNOWN TO BE THIS
+    // ONE (2026-08-23). It used to be an unconditional default, which put
+    // ETRS89 / UTM 33N on polygons drawn over terrain from anywhere on Earth —
+    // and a .prj is not a label, it is what a reader USES TO PLACE THE
+    // GEOMETRY. A wrong one silently lands the drawing in the wrong country.
+    //
+    // ⚠️ WHEN THE CRS IS UNKNOWN OR DIFFERENT, prj IS null AND THE CALLER MUST
+    // OMIT THE FILE. That is not a gap: a shapefile with no .prj means "CRS
+    // unstated", which every GIS handles by asking. There is no honest way to
+    // synthesise WKT for an arbitrary EPSG without a projection database, and
+    // guessing the parameters would be worse than saying nothing.
+    prj: opts.wkt ?? (opts.epsg != null && Number(opts.epsg) !== 25833 ? null
+      : 'PROJCS["ETRS89 / UTM zone 33N",GEOGCS["ETRS89",'
       + 'DATUM["European_Terrestrial_Reference_System_1989",'
       + 'SPHEROID["GRS 1980",6378137,298.257222101]],PRIMEM["Greenwich",0],'
       + 'UNIT["degree",0.0174532925199433]],PROJECTION["Transverse_Mercator"],'
       + 'PARAMETER["latitude_of_origin",0],PARAMETER["central_meridian",15],'
       + 'PARAMETER["scale_factor",0.9996],PARAMETER["false_easting",500000],'
-      + 'PARAMETER["false_northing",0],UNIT["metre",1],AUTHORITY["EPSG","25833"]]',
+      + 'PARAMETER["false_northing",0],UNIT["metre",1],AUTHORITY["EPSG","25833"]]'),
   };
 }
 
@@ -198,8 +207,15 @@ function writeDBF(features, fields) {
   return buf;
 }
 
-/** GeoJSON alongside — three lines, and it has none of the traps above. */
-export function writeGeoJSON(features, { crs = "EPSG:25833" } = {}) {
+/**
+ * GeoJSON alongside — three lines, and it has none of the traps above.
+ * ⚠️ NO DEFAULT CRS. This defaulted to "EPSG:25833" and so stamped this tool's
+ * home coordinate system onto geometry from anywhere. Passed nothing, it now
+ * names no CRS — which for GeoJSON is the correct reading anyway, since RFC
+ * 7946 says an unstated CRS is WGS 84 and inventing a different one in the file
+ * is worse than leaving the caller to say what they mean.
+ */
+export function writeGeoJSON(features, { crs = null } = {}) {
   return JSON.stringify({
     type: "FeatureCollection",
     // ⚠️ GeoJSON WANTS COUNTER-CLOCKWISE OUTER RINGS — the opposite of the
@@ -212,6 +228,10 @@ export function writeGeoJSON(features, { crs = "EPSG:25833" } = {}) {
         coordinates: f.rings.map((r, i) => normaliseRing(r, i !== 0)),
       },
     })),
-    crs: { type: "name", properties: { name: `urn:ogc:def:crs:${crs.replace(":", "::")}` } },
+    // ⚠️ THE MEMBER IS OMITTED ENTIRELY WHEN THE CRS IS UNKNOWN, rather than
+    // written with a placeholder. `crs.replace` on null would also have thrown.
+    ...(crs
+      ? { crs: { type: "name", properties: { name: `urn:ogc:def:crs:${crs.replace(":", "::")}` } } }
+      : {}),
   });
 }

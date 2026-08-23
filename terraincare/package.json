@@ -1,6 +1,6 @@
 {
   "name": "dl-terrain-diversity",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "DL-TerrainDiversity — a Terrain Design Information Model (TDIM). A terrain analysis instrument; not a prediction.",
   "author": "Digital Landscapes (Marc-Eduard Ihle)",
   "license": "Apache-2.0",

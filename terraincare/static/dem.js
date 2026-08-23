@@ -27,11 +27,67 @@ export class DEM {
     this.originX = originX;
     this.originY = originY;
     this.name = name;
+    /**
+     * The CRS THE FILE DECLARED, or null if it declared none.
+     * ⚠️ NEVER DEFAULTED. Everything that prints or writes a coordinate system
+     * must read this and say "unknown" when it is null, rather than fall back
+     * to the site this tool was developed on. See geoKeys() in geotiff.js.
+     * @type {string|null}
+     */
+    this.crs = null;
+    /** @type {number|null} EPSG of the horizontal CRS, when the file gave one. */
+    this.epsg = null;
   }
 
   /** @param {import("./geotiff.js").DEM} raw */
   static fromRaw(raw) {
-    return new DEM(raw.z, raw.nrows, raw.ncols, raw.cell, raw.originX, raw.originY, raw.name);
+    const d = new DEM(raw.z, raw.nrows, raw.ncols, raw.cell, raw.originX, raw.originY, raw.name);
+    d.crs = raw.crs ?? null;
+    d.epsg = raw.epsg ?? null;
+    return d;
+  }
+
+  /**
+   * Approximate latitude at the centre of the raster, in degrees, or null.
+   *
+   * ⚠️ FOR THE SUN, AND DECLARED AS APPROXIMATE. Solar radiation needs a
+   * latitude; before this it used a CONSTANT 69.70084 — Ørndalen's — for every
+   * raster ever loaded, so a site in Bavaria was lit by an arctic sun. Deriving
+   * it from the georeference is wrong by a fraction of a degree; assuming it was
+   * wrong by tens.
+   *
+   * ⚠️ ONLY FOR NORTHERN-HEMISPHERE UTM-STYLE GRIDS, which is what the EPSG
+   * ranges below are: ETRS89 / UTM (25828-25838), WGS84 / UTM north
+   * (32601-32660) and ED50 / UTM (23028-23038). Anything else returns null and
+   * the caller must ask rather than assume.
+   *
+   * A UTM northing is the meridian arc from the equator MULTIPLIED by the
+   * 0.9996 central-scale factor, so the arc is northing/0.9996 — and the arc is
+   * converted with 111,132 m per degree, the MEAN meridian degree on WGS84.
+   * ⚠️ NOT 111,320: that is a degree of longitude at the equator, and using it
+   * here was wrong by about a quarter of a degree. ⚠️ AND THE ORIGIN IS THE
+   * SOUTH-WEST CORNER, so the centre northing is origin PLUS half the height;
+   * subtracting put the sample south of the raster.
+   *
+   * Checked against a control: Ørndalen's true centre is 69.70084 °N
+   * (data/orndalen/SOURCE.txt) and this returns ~69.65 — within 0.06°. The
+   * meridian degree varies from 110.57 km at the equator to 111.69 at the pole,
+   * so a single mean constant costs up to ~0.15° anywhere on Earth. That is
+   * ample for a sun angle and is why this is named APPROX and is never reported
+   * as a measurement.
+   * @returns {number|null}
+   */
+  approxLatitudeDeg() {
+    const e = this.epsg;
+    if (!e) return null;
+    const utmNorth = (e >= 25828 && e <= 25838)
+      || (e >= 32601 && e <= 32660)
+      || (e >= 23028 && e <= 23038);
+    if (!utmNorth) return null;
+    const northing = this.originY + (this.nrows * this.cell) / 2;
+    if (!Number.isFinite(northing) || northing <= 0) return null;
+    const lat = (northing / 0.9996) / 111132;
+    return lat > 0 && lat < 84 ? lat : null;
   }
 
   /** Row-major index. */

@@ -288,8 +288,14 @@ function runPass(seq, wantPanels, heavy = false) {
     // integrate nothing at all and render a blank layer.
     const span = solarPeriod[1] - solarPeriod[0];
     const dayStep = span <= 3 ? 1 : span <= 45 ? 3 : span <= 120 ? 7 : 14;
+    // The latitude comes from the RASTER, not from this tool's home site.
+    // approxLatitudeDeg() returns null for grids it cannot derive one from
+    // (non-UTM, or no CRS in the file), and solarRadiation then falls back
+    // to its own documented default rather than being handed a guess.
+    const latitudeDeg = dem.approxLatitudeDeg?.() ?? undefined;
     const sun = solarRadiation(dem, gradient, hz, {
       dayStart: solarPeriod[0], dayEnd: solarPeriod[1], dayStep,
+      ...(latitudeDeg === undefined ? {} : { latitudeDeg }),
     });
     // Keep the settle-only grids for export. svf's own buffer is transferred to
     // the main thread below (it doubles as ambient occlusion), so this holds a
@@ -459,6 +465,7 @@ self.onmessage = (e) => {
     const incoming = new Float32Array(m.z);
     dem = new DEM(
       incoming.slice(), m.nrows, m.ncols, m.cell, m.originX, m.originY, m.name);
+    dem.epsg = m.epsg ?? null;
     baseZ = incoming.slice();
     runPass(m.seq ?? 0, true, true);
     return;

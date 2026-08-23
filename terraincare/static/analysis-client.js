@@ -104,6 +104,10 @@ export class AnalysisClient {
       z: dem.z.slice().buffer,
       nrows: dem.nrows, ncols: dem.ncols, cell: dem.cell,
       originX: dem.originX, originY: dem.originY, name: dem.name,
+      // The CRS travels with the raster: the worker derives the SUN's
+      // latitude from it. Without this the sun was fixed at the
+      // development site's 69.7 N for every raster on Earth.
+      epsg: dem.epsg ?? null,
       seq: ++this.seq,
     });
     this.inFlight = true;

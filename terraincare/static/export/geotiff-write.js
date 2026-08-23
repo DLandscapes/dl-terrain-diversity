@@ -34,7 +34,15 @@ export function writeGeoTIFF(z, nrows, ncols, cell, originX, originY, opts = {})
   if (z.length !== nrows * ncols) {
     throw new Error(`writeGeoTIFF: z.length ${z.length} !== ${nrows}*${ncols}`);
   }
-  const epsg = opts.epsg ?? 25833;
+  // ⚠️⚠️ NO DEFAULT EPSG. This read `opts.epsg ?? 25833` until 2026-08-23, so a
+  // raster imported from anywhere on Earth was written back out declaring
+  // ETRS89 / UTM 33N in its own GeoKeys. Not a mislabel in the interface — a
+  // corrupt georeference in the FILE, which every downstream GIS would then
+  // believe. A tool that claims GIS-grade output must never invent a datum.
+  // When the CRS is unknown the file says so, per the GeoTIFF spec, rather than
+  // guessing: GTModelType and ProjectedCSType both become 32767 (user-defined),
+  // which is the standard way to state "not a registered code".
+  const epsg = Number.isFinite(opts.epsg) ? Number(opts.epsg) : null;
 
   // ⚠️ The tiepoint is the NORTH-west corner; dem.js stores the SOUTH-west one.
   // geotiff.js inverts this on the way in (originY = tie.y + tie.j*cell -
@@ -52,9 +60,9 @@ export function writeGeoTIFF(z, nrows, ncols, cell, originX, originY, opts = {})
   //   3072 ProjectedCSType = EPSG code
   const geoKeys = [
     1, 1, 0, 3,
-    1024, 0, 1, 1,
+    1024, 0, 1, epsg === null ? 32767 : 1,
     1025, 0, 1, 1,
-    3072, 0, 1, epsg,
+    3072, 0, 1, epsg === null ? 32767 : epsg,
   ];
   const nodataText = "nan\0";
 

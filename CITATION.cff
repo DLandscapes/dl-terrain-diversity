@@ -14,9 +14,9 @@ authors:
   - family-names: Ihle
     given-names: Marc-Eduard
     affiliation: "Digital Landscapes"
-    # Affiliation is Digital Landscapes, not UiT: the instrument was developed
-    # independently of the university and is applied there in teaching. See the
-    # Software availability statement in the ECLAS 2026 extended abstract.
+    # ⚠️ STANDING RULE: the affiliation for a Digital Landscapes tool is
+    # Digital Landscapes, never a university. The instrument is owned
+    # independently; see NOTICE.
 abstract: >-
   A Terrain Design Information Model (TDIM) for landscape architecture: the
   ground is held as a model the designer works with, from which the drawings —
@@ -29,10 +29,11 @@ abstract: >-
   abiotic conditions into a modelled species assemblage. Built to test a single
   claim: that the relief which differentiates habitat falls below the resolution
   of national terrain and soil data, and therefore has to be designed and
-  specified rather than surveyed. Runs in a browser with no installation, no
-  build step and no dependencies; exports GIS-grade rasters, meshes, polygons
-  and a full provenance record. It remains a terrain analysis instrument, not a
-  prediction.
+  specified rather than surveyed. Runs in a browser with no installation and no
+  build step — its one runtime library is vendored, so there is nothing to
+  fetch; exports GIS-grade rasters, meshes, polygons and a full provenance
+  record, each carrying the coordinate system its source declared. It remains a
+  terrain analysis instrument, not a prediction.
 keywords:
   - terrain design information model
   - TDIM
@@ -48,13 +49,13 @@ keywords:
 license: Apache-2.0
 repository-code: "https://github.com/DLandscapes/dl-terrain-diversity"
 url: "https://digital-landscapes.com/"
-version: "0.11.0"
+version: "0.12.0"
 date-released: "2026-08-23"
 # doi: ADDED AT RELEASE TAGGING, NOT BEFORE. A CITATION.cff with a dead DOI is
 #      worse than none, so the field is OMITTED rather than carrying a
 #      placeholder. Reserve the DOI on Zenodo, paste it in as
 #        doi: "10.5281/zenodo.NNNNNNN"
-#      commit that, and only then tag v0.11.0 — so the archived snapshot
+#      commit that, and only then tag v0.12.0 — so the archived snapshot
 #      correctly contains its own identifier.
 references:
   # ⚠️ THE METHOD'S OWN PRIOR PUBLICATION, AND THE DATE IS THE POINT. TDIM was

@@ -140,6 +140,60 @@ function tiepoint(tags) {
   return null;
 }
 
+/**
+ * The CRS the file itself declares, from GeoKeyDirectoryTag (34735).
+ *
+ * ⚠️⚠️ THIS WAS MISSING, AND ITS ABSENCE WAS NOT A LIMITATION BUT A FALSEHOOD
+ * (2026-08-23). The reader took cell size, origin and nodata from the file and
+ * then said nothing about the coordinate system — while the app asserted
+ * "EPSG:25833" in nine places, including the GeoTIFF writer and the shapefile
+ * and GeoJSON exports. Import terrain from anywhere else and every export left
+ * this tool carrying a georeference that was simply wrong. Being calibrated for
+ * one region is a stated limit; relabelling somebody's coordinate system is a
+ * data-integrity failure, and a tool that claims GIS-grade output may not do it.
+ *
+ * The directory is a flat Uint16 array: a four-entry header
+ * [version, revision, minorRevision, numberOfKeys], then one four-entry record
+ * per key [keyID, tiffTagLocation, count, valueOffset]. When tiffTagLocation is
+ * 0 the value IS valueOffset, which is the case for all three keys read here —
+ * they are SHORTs holding EPSG codes. Keys whose values live in another tag are
+ * skipped rather than half-read.
+ *
+ * @param {Map<number, TiffTagValue>} tags
+ * @returns {{projected: number|null, geographic: number|null, vertical: number|null}|null}
+ */
+function geoKeys(tags) {
+  const gk = arr(tags, 34735);
+  if (!gk || gk.length < 4) return null;
+  const count = gk[3];
+  let projected = null, geographic = null, vertical = null;
+  for (let k = 0; k < count; k++) {
+    const o = 4 + k * 4;
+    if (o + 3 >= gk.length) break;              // truncated directory: stop, do not guess
+    const id = gk[o], location = gk[o + 1], value = gk[o + 3];
+    if (location !== 0) continue;               // value is in another tag; not read here
+    if (id === 3072) projected = value;         // ProjectedCSTypeGeoKey
+    else if (id === 2048) geographic = value;   // GeographicTypeGeoKey
+    else if (id === 4096) vertical = value;     // VerticalCSTypeGeoKey
+  }
+  return { projected, geographic, vertical };
+}
+
+/**
+ * A label for the CRS, or null when the file does not say.
+ * ⚠️ NULL IS A RESULT, NOT A FAILURE. "unknown" is the honest thing to print
+ * over a raster whose file carried no GeoKeys; a default would be a guess
+ * wearing the costume of a measurement.
+ * @param {{projected: number|null, geographic: number|null, vertical: number|null}|null} k
+ */
+function crsLabel(k) {
+  if (!k) return null;
+  const h = k.projected ?? k.geographic;
+  if (!h || h === 32767) return null;           // 32767 = user-defined
+  const v = k.vertical && k.vertical !== 32767 ? ` / EPSG:${k.vertical}` : "";
+  return `EPSG:${h}${v}`;
+}
+
 /** @param {Map<number, TiffTagValue>} tags */
 function gdalNodata(tags) {
   const v = tags.get(42113)?.value;
@@ -393,9 +447,18 @@ export function loadGeoTIFF(buf, opts = {}) {
     warnings.push(`raster downsampled by factor ${step} for interactive use (cell size now ${cell})`);
   }
 
+  // The CRS the FILE declares. Null when it declares none — see crsLabel().
+  const keys = geoKeys(tags);
+  const crs = crsLabel(keys);
+  if (!crs) {
+    warnings.push("no coordinate system in the file's GeoKeys; CRS reported as unknown");
+  }
+
   return {
     z, nrows, ncols, cell, originX, originY,
     name, downsampledBy: step, warnings,
+    crs, epsg: keys ? keys.projected ?? keys.geographic ?? null : null,
+    epsgVertical: keys ? keys.vertical ?? null : null,
   };
 }
 

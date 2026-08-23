@@ -703,10 +703,13 @@ export function drawHUD(g, o) {
   {
     const tx = L0 + 6;
     scrim(g, L0, PAD, PW, TITLE_H, t);
-    label(g, m.site || "ØRNDALEN", tx, PAD + 14, t, { size: 11.5, colour: t.ink });
+    label(g, m.site || "", tx, PAD + 14, t, { size: 11.5, colour: t.ink });
     label(g, m.grid || "", tx, PAD + 25, t, { size: 6.5, colour: t.dim });
     label(g, m.zline || "", tx, PAD + 34, t, { size: 6.5, colour: t.dim });
-    label(g, m.crs || "EPSG:25833 · NN2000", tx, PAD + 43, t, { size: 6.5, colour: t.dim });
+    // ⚠️ NO FALLBACK CRS. It read `m.crs || "EPSG:25833 · NN2000"`, so a frame
+    // over terrain from anywhere carried this tool's home datum in its own
+    // caption. When the CRS is unknown the line is simply blank.
+    label(g, m.crs || "", tx, PAD + 43, t, { size: 6.5, colour: t.dim });
   }
 
   // ── index rail, across the top ───────────────────────────────────────────
