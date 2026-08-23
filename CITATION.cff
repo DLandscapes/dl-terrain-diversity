@@ -79,10 +79,16 @@ references:
     title: >-
       Digital Terrain Analysis as an Interface of Care: Revealing Morphological
       Complexity to Support Ecological Diversity
+    # ⚠️ NO affiliation FIELD, DELIBERATELY. Standing rule: the affiliation for
+    # every Digital Landscapes tool is Digital Landscapes, never a university.
+    # The field is OMITTED rather than reassigned — this entry describes a
+    # conference paper, and asserting a different affiliation than the one that
+    # paper carries would make the citation wrong. Dropping the field keeps the
+    # reference accurate (author, title, conference, venue, year all stand) and
+    # states no institution at all.
     authors:
       - family-names: Ihle
         given-names: Marc-Eduard
-        affiliation: "UiT The Arctic University of Norway"
     conference:
       name: >-
         ECLAS 2026 — Take Care: Planetary Landscape Architecture

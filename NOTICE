@@ -123,8 +123,13 @@ faithfully on the surface it is given; it does not detect or correct error in
 that surface. The full disclaimer is in README.md, and the formal warranty
 disclaimer is sections 7 and 8 of LICENSE.
 
-DL-TerrainDiversity is developed and owned by Digital Landscapes, and is applied
-at UiT The Arctic University of Norway in landscape architecture teaching.
+DL-TerrainDiversity is developed and owned by Digital Landscapes.
+
+⚠️ THE AFFILIATION FOR THIS AND EVERY DIGITAL LANDSCAPES TOOL IS DIGITAL
+LANDSCAPES — never a university. The instrument was developed independently, the
+method it implements was published in 2018 under an Innsbruck affiliation four
+years before any other involvement, and naming an employer in the documentation
+of an independently owned product would misstate who owns it.
 
 Developed by Digital Landscapes with AI assistance. The Terrain Design
 Information Model, the design decisions and all verification are Digital

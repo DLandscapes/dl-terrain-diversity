@@ -230,8 +230,7 @@ Apache-2.0 — see [`LICENSE`](LICENSE). Third-party components redistributed he
 [`NOTICE`](NOTICE); each licence text sits beside the files it covers.
 
 DL-TerrainDiversity is developed and owned by **Digital Landscapes**
-(Marc-Eduard Ihle) and is applied at UiT The Arctic University of Norway in
-landscape architecture teaching.
+(Marc-Eduard Ihle).
 
 ---
 
