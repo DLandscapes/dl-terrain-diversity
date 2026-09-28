@@ -58,12 +58,19 @@ import {
 } from "./guide.js";
 import { symbolField, strideFor, symbolLegend } from "./symbols.js";
 import { gradingSVG } from "./export/grading.js";
+import { attract, FALLOFF } from "./attract.js";
 import { buildGlyph, buildGlyphs, describeChain, DEFAULT_CHAIN } from "./glyphs.js";
 import { DURATION, SCRIPT, WAVELENGTH_M, beatAt, stateAt, applyTerrain,
   toleranceField, boundaries } from "./timeline.js";
 import { connectedComponents, landformPatches, benchByPatch } from "./patches.js";
 import { compareAt, compareSchemes, measureSurface, matchUniformInterval,
   EXPERIMENT } from "./compare.js";
+import { extendToTile } from "./section.js";
+import { traceLabelRings, ringsArea, signedArea } from "./export/trace.js";
+import { channelReaches, catchmentPolygons, CHANNEL_CLASSES } from "./export/network.js";
+import { writeDXF, ACI } from "./export/dxf.js";
+import { quadtreeIndex } from "./contextlod.js";
+import { externalInflow } from "./analysis/inflow.js";
 import { isopachSVG, slopeClassSVG, drainageSVG, chainageSectionsSVG,
   SLOPE_CLASSES } from "./export/derivatives.js";
 
@@ -6977,6 +6984,802 @@ export async function runSuite(fetchTile) {
       "no CRS", String(none.crs), none.crs === null);
     add(W2, "…and specifically does not claim this tool's own home CRS",
       "not EPSG:25833", String(none.crs), none.crs !== "EPSG:25833");
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════════
+     PHASE 18's OWN CODE.
+
+     ⚠️ EVERY ONE OF THESE WAS VALIDATED AGAINST A CONTROL WHEN IT WAS WRITTEN,
+     AND NONE OF IT WAS IN THE SUITE. That is the debt phase 18 recorded against
+     itself: a control run once in a throwaway script proves the code worked
+     that afternoon, and protects nothing afterwards. These are the same
+     controls, kept.
+     ═══════════════════════════════════════════════════════════════════════ */
+  {
+    const X1 = "X1 · a section's cut runs the full width of the tile";
+    // ⚠️ THE CLIP PLANE IS INFINITE. A face spanning only the clicked stretch
+    // left bare open shell running to the tile edge — see section-face.js.
+    const grid = { originX: 0, originY: 0, ncols: 10, nrows: 10, cell: 1 };
+
+    const ax = extendToTile(grid, [3, 5], [6, 5]);
+    add(X1, "an axis-aligned cut is carried out to both tile edges, and the "
+      + "clicked points come back as stations along it",
+      "0..10, anchors 3 and 6",
+      `${ax.a[0]}..${ax.b[0]}, anchors ${ax.anchors[0]} and ${ax.anchors[1]}`,
+      ax.a[0] === 0 && ax.b[0] === 10 && ax.a[1] === 5 && ax.b[1] === 5
+        && near(ax.anchors[0], 3, 1e-9) && near(ax.anchors[1], 6, 1e-9));
+
+    // ⚠️ THE DIAGONAL IS THE CASE A FIXED OVER-EXTENSION GETS WRONG: the tile's
+    // diagonal is 1.41x its side, so a constant overshoot falls short here and
+    // overshoots on an axis-aligned cut. Liang-Barsky binds on whichever pair
+    // of edges the line actually meets.
+    const dg = extendToTile(grid, [2, 1], [4, 3]);
+    add(X1, "…and a DIAGONAL cut binds on the edges it actually meets, not on a "
+      + "fixed overshoot",
+      "(1,0) to (10,9)",
+      `(${dg.a[0]},${dg.a[1]}) to (${dg.b[0]},${dg.b[1]})`,
+      near(dg.a[0], 1, 1e-9) && near(dg.a[1], 0, 1e-9)
+        && near(dg.b[0], 10, 1e-9) && near(dg.b[1], 9, 1e-9));
+
+    // ⚠️ THE ANCHORS ARE WHAT THE VERTICALS AND THE LETTER ARE DRAWN AT. If they
+    // did not round-trip, the section reference would stand somewhere the user
+    // never clicked — which is a drawing that lies about its own extent.
+    const back = [
+      [dg.a[0] + (dg.b[0] - dg.a[0]) * (dg.anchors[0] / Math.hypot(dg.b[0] - dg.a[0], dg.b[1] - dg.a[1])),
+       dg.a[1] + (dg.b[1] - dg.a[1]) * (dg.anchors[0] / Math.hypot(dg.b[0] - dg.a[0], dg.b[1] - dg.a[1]))],
+    ][0];
+    add(X1, "…and the anchor stations round-trip to the CLICKED points exactly, "
+      + "so the section's verticals stand where the user put them",
+      `(${f4(2)}, ${f4(1)})`, `(${f4(back[0])}, ${f4(back[1])})`,
+      near(back[0], 2, 1e-9) && near(back[1], 1, 1e-9));
+
+    // ⚠️ A DEGENERATE CLIP MUST FALL BACK TO THE DRAWN LINE, never to a
+    // fragment of it: a face that quietly stopped short would read as a hole.
+    // ⚠️ THE LINE MUST GENUINELY MISS. Written first as (50,50)-(60,60), which
+    // is y = x — a line straight through the tile'"'"'s own diagonal, so it enters at
+    // the corner and the "fallback" never fires. The control was wrong, not the
+    // code. This one passes well above the tile at every x it crosses.
+    const out = extendToTile(grid, [50, 50], [60, 55]);
+    add(X1, "a cut whose line never meets the tile falls back to the drawn line "
+      + "rather than to a fragment of it",
+      "the clicked line", `(${out.a[0]},${out.a[1]})-(${out.b[0]},${out.b[1]})`,
+      out.a[0] === 50 && out.a[1] === 50 && out.b[0] === 60 && out.b[1] === 55);
+    // ⚠️⚠️ THE CLAMP THAT KEEPS THE FACE AT LEAST AS LONG AS THE SECTION. A
+    // section drawn from inside the tile to a point beyond it would otherwise
+    // come back CUT AT THE EDGE — and the anchor station computed from the
+    // clicked length would then fall outside the face, putting the section's
+    // own reference mark on ground the drawing does not cover. Added after a
+    // mutation test showed nothing in this group exercised it.
+    const over = extendToTile(grid, [5, 5], [15, 5]);
+    const oLen = Math.hypot(over.b[0] - over.a[0], over.b[1] - over.a[1]);
+    add(X1, "a cut running out PAST the tile is never returned shorter than the "
+      + "line that was drawn — its far anchor must still land on the face",
+      "at least 10 long, anchor ≤ length",
+      `${f2(oLen)} long, far anchor ${f2(over.anchors[1])}`,
+      oLen >= 10 - 1e-9 && over.anchors[1] <= oLen + 1e-9);
+
+    const zero = extendToTile(grid, [4, 4], [4, 4]);
+    add(X1, "…and a zero-length cut returns itself rather than dividing by its "
+      + "own length", "no NaN",
+      `${zero.a[0]},${zero.anchors[0]}`,
+      Number.isFinite(zero.anchors[0]) && Number.isFinite(zero.anchors[1]));
+  }
+
+  {
+    const X2 = "X2 · raster labels become polygons whose area is the cells' own";
+    // ⚠️ CELL EDGES, NOT MARCHING SQUARES. A divide is not a level set of
+    // anything, so the ring must enclose exactly the cells carrying the label.
+    const mk = (rowsIn) => {
+      const nrows = rowsIn.length, ncols = rowsIn[0].length;
+      const a = new Int32Array(nrows * ncols);
+      rowsIn.forEach((row, r) => row.split("").forEach((ch, c) => {
+        a[r * ncols + c] = ch === "." ? -1 : Number(ch);
+      }));
+      return { a, nrows, ncols };
+    };
+
+    const blk = mk([".....", ".111.", ".111.", ".111.", "....."]);
+    const bf = traceLabelRings(blk.a, { nrows: blk.nrows, ncols: blk.ncols, cell: 2, originX: 1000, originY: 2000 });
+    add(X2, "a solid block traces to ONE ring whose area is exactly the cell "
+      + "count times the cell area — not an interpolated contour",
+      "1 feature, 36 m²",
+      `${bf.length} feature(s), ${ringsArea(bf[0].rings)} m²`,
+      bf.length === 1 && ringsArea(bf[0].rings) === 36 && bf[0].rings.length === 1);
+
+    add(X2, "…and collinear vertices are dropped, so a square is five points "
+      + "rather than one per cell",
+      "5", String(bf[0].rings[0].length), bf[0].rings[0].length === 5);
+
+    const donut = mk([".....", ".111.", ".1.1.", ".111.", "....."]);
+    const df = traceLabelRings(donut.a, { nrows: 5, ncols: 5, cell: 1, originX: 0, originY: 0 });
+    add(X2, "a hole comes back as a SECOND ring and is subtracted from the area, "
+      + "rather than being filled in",
+      "2 rings, area 8", `${df[0].rings.length} rings, area ${ringsArea(df[0].rings)}`,
+      df[0].rings.length === 2 && ringsArea(df[0].rings) === 8);
+
+    // ⚠️ ONE FEATURE PER CONNECTED COMPONENT. A shapefile polygon whose rings
+    // are disjoint is malformed, not multipart — and MICRO is a class, so one
+    // label genuinely covers many separate basins.
+    const two = mk(["1..1", "1..1", "....", "2222"]);
+    const tf = traceLabelRings(two.a, { nrows: 4, ncols: 4, cell: 1, originX: 0, originY: 0 });
+    add(X2, "one label in two disjoint places becomes TWO features, because a "
+      + "polygon with disjoint rings is malformed rather than multipart",
+      "3 features, labels 1,1,2",
+      `${tf.length} features, labels ${tf.map((x) => x.label).sort().join(",")}`,
+      tf.length === 3 && tf.map((x) => x.label).sort().join(",") === "1,1,2");
+
+    const diag = mk(["1.", ".1"]);
+    const dgf = traceLabelRings(diag.a, { nrows: 2, ncols: 2, cell: 1, originX: 0, originY: 0 });
+    add(X2, "…and cells touching only at a CORNER are two components, matching "
+      + "the four-connected edge walk that outlines them",
+      "2", String(dgf.length), dgf.length === 2);
+
+    // ⚠️ ROW 0 IS THE NORTH EDGE. Getting this wrong mirrors every basin about
+    // the tile centre — a perfectly plausible map of the wrong ground.
+    // ⚠️⚠️ THREE ROWS, LABEL IN THE TOP ONE. Written first on a ONE-ROW grid,
+    // where `nrows - r` and `r` produce the same pair of values — so the control
+    // could not tell a north-up read from a south-up one, and a mutation test
+    // proved it by mirroring the file and watching this pass. A mirrored basin
+    // map is a perfectly plausible map of the wrong ground.
+    const one = mk(["11", "..", ".."]);
+    const of_ = traceLabelRings(one.a, { nrows: 3, ncols: 2, cell: 10, originX: 500, originY: 700 });
+    const ys = of_[0].rings[0].map((pt) => pt[1]);
+    add(X2, "row 0 is the NORTH edge, so the TOP row of cells lands in the TOP "
+      + "third of the tile — not mirrored about its centre",
+      "y 720..730", `y ${Math.min(...ys)}..${Math.max(...ys)}`,
+      Math.min(...ys) === 720 && Math.max(...ys) === 730);
+
+    // The invariant that matters, on ground the eye cannot check.
+    let seed = 12345;
+    const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+    const NR = 40, NC = 37, big = new Int32Array(NR * NC);
+    for (let i = 0; i < big.length; i++) big[i] = rnd() < 0.15 ? -1 : (rnd() * 4) | 0;
+    const bigF = traceLabelRings(big, { nrows: NR, ncols: NC, cell: 0.25, originX: 0, originY: 0 });
+    const traced = bigF.reduce((acc, x) => acc + ringsArea(x.rings), 0);
+    const kept = [...big].filter((v) => v >= 0).length * 0.0625;
+    add(X2, "over a field of many labels the TOTAL traced area equals the total "
+      + "kept cell area exactly — the invariant the export is trusted on",
+      f4(kept), f4(traced), near(traced, kept, 1e-9));
+  }
+
+  {
+    const X3 = "X3 · the drainage network as data, not as ink";
+    // ⚠️ drainageSVG draws one stub per cell, which is right for ink and
+    // worthless as data. The export traces connected REACHES.
+    // ⚠️ ON THE REAL TILE, not a synthetic plane: a plane has no channels, so
+    // every check below would pass over an empty list and prove nothing.
+    // ⚠️ THE POI HILLSIDE, NOT THE FILL PATCH. The fill patch is flat enough
+    // that nothing reaches the 1 %-of-tile channel threshold, so every check
+    // below would pass over an EMPTY list — which is how a suite reports green
+    // on a feature that does nothing.
+    const vdem = DEM.fromRaw(loadGeoTIFF(
+      await fetchTile("orndalen_poi_025m.tif"), { name: "vector" }));
+    const ch = channelReaches(vdem);
+    add(X3, "the channel export returns connected REACHES, not one stub per "
+      + "cell — every reach has at least two stations",
+      "all ≥ 2 points",
+      `${ch.reaches.length} reaches, min ${Math.min(...ch.reaches.map((r) => r.pts.length))}`,
+      ch.reaches.length > 0 && ch.reaches.every((r) => r.pts.length >= 2));
+
+    add(X3, "…and each carries the class its contributing area puts it in, "
+      + "using the drainage sheet's own thresholds",
+      "classes within 1..3",
+      ch.reaches.map((r) => r.cls).filter((c) => c < 1 || c > 3).length + " out of range",
+      ch.reaches.every((r) => r.cls >= 1 && r.cls <= CHANNEL_CLASSES.length));
+
+    // ⚠️ A REACH IS NOT A RING. Closing one would join its mouth to its head.
+    add(X3, "a reach is never closed back on itself — a channel has a mouth and "
+      + "a head, and they are different places",
+      "none closed",
+      ch.reaches.filter((r) => r.pts[0][0] === r.pts[r.pts.length - 1][0]
+        && r.pts[0][1] === r.pts[r.pts.length - 1][1]).length + " closed",
+      ch.reaches.every((r) => !(r.pts[0][0] === r.pts[r.pts.length - 1][0]
+        && r.pts[0][1] === r.pts[r.pts.length - 1][1])));
+
+    /**
+     * ⚠️⚠️ THE RULE THE REACHES ARE BUILT ON: a reach runs from a head, or from
+     * a confluence, DOWN TO THE NEXT CONFLUENCE. Nothing above tested it — the
+     * checks so far pass under any splitting rule at all, which a mutation test
+     * demonstrated by moving the confluence threshold and watching the group
+     * stay green.
+     *
+     * A confluence is found here INDEPENDENTLY of the exporter: a point that is
+     * the downstream END of more than one reach. No reach may then run THROUGH
+     * one, or the network cannot be traversed reach by reach.
+     */
+    // ⚠️⚠️ THE TEST MUST NOT DEFINE A CONFLUENCE FROM THE REACHES IT IS TESTING.
+    // Written that way first — "a point that ends more than one reach" — and a
+    // mutation that moved the splitting threshold moved that definition along
+    // with it, so the check stayed green over a network split by the wrong rule.
+    // What does NOT move with the splitting is this: a junction may not be
+    // INTERIOR to one reach while TERMINATING another. That is a T-junction in
+    // the network, and running through a confluence is precisely what makes one.
+    const key = (pt) => `${pt[0].toFixed(3)},${pt[1].toFixed(3)}`;
+    const terminal = new Set(), interior = new Set();
+    for (const r of ch.reaches) {
+      terminal.add(key(r.pts[0]));
+      terminal.add(key(r.pts[r.pts.length - 1]));
+      for (let i = 1; i < r.pts.length - 1; i++) interior.add(key(r.pts[i]));
+    }
+    let through = 0;
+    for (const k of interior) if (terminal.has(k)) through++;
+    add(X3, "no reach runs THROUGH a point where another reach ends, so the "
+      + "network can be walked reach by reach rather than re-traced",
+      "0 T-junctions", `${through} of ${terminal.size} junctions`,
+      terminal.size > 0 && through === 0);
+
+    const ca = catchmentPolygons(vdem);
+    const cellA = vdem.cell * vdem.cell;
+    const polyA = ca.catchments.reduce((acc, c) => acc + c.areaM2, 0);
+    const cells = ca.catchments.reduce((acc, c) => acc + c.cells, 0);
+    add(X3, "every catchment polygon's area equals its own cell count times the "
+      + "cell area, so the map and the count cannot disagree",
+      f4(cells * cellA), f4(polyA), near(polyA, cells * cellA, 1e-6));
+
+    // ⚠️ MICRO IS A CLASS, NOT A FAILURE. On 0.25 m ground most of the surface
+    // drains to a hollow too small to be a catchment, and dropping those would
+    // export a tidier map of a site that does not exist.
+    add(X3, "micro catchments are LABELLED and kept, not dropped — they are a "
+      + "measurement about the ground, not a failure of the delineation",
+      "micro present and flagged",
+      `${ca.catchments.filter((c) => c.micro).length} of ${ca.catchments.length}`,
+      ca.catchments.every((c) => typeof c.micro === "boolean"));
+
+    // ── the writers ────────────────────────────────────────────────────────
+    const line = writeShapefile(
+      [{ rings: [[[100, 200], [110, 205], [120, 199]]], attributes: { id: 1 } }],
+      { type: "polyline", epsg: 25833 });
+    const dv = new DataView(line.shp.buffer, line.shp.byteOffset, line.shp.byteLength);
+    add(X3, "a PolyLine shapefile declares shape type 3 in its header, its "
+      + "index and its record — a file that half-declares itself is worse than one that fails",
+      "3 / 3 / 3",
+      `${dv.getInt32(32, true)} / ${new DataView(line.shx.buffer, line.shx.byteOffset, line.shx.byteLength).getInt32(32, true)} / ${dv.getInt32(108, true)}`,
+      dv.getInt32(32, true) === 3 && dv.getInt32(108, true) === 3);
+
+    add(X3, "…and its declared file length matches the bytes actually written",
+      String(line.shp.byteLength), String(dv.getInt32(24, false) * 2),
+      dv.getInt32(24, false) * 2 === line.shp.byteLength);
+
+    // ⚠️ THE CONTRACT DIFFERS EVEN THOUGH THE RECORD LAYOUT DOES NOT: a polygon
+    // is closed and rewound, a polyline is left exactly as given.
+    add(X3, "…and a polyline keeps the point count it was GIVEN, where a "
+      + "polygon is closed back to its first point",
+      "3 points, polygon 5", `${dv.getInt32(108 + 4 + 36, true)} points`,
+      dv.getInt32(108 + 4 + 36, true) === 3);
+    const poly = writeShapefile(
+      [{ rings: [[[0, 0], [0, 1], [1, 1], [1, 0]]], attributes: { id: 1 } }], { epsg: 25833 });
+    const pv = new DataView(poly.shp.buffer, poly.shp.byteOffset, poly.shp.byteLength);
+    add(X3, "…and the polygon writer is unaffected — still type 5, still closed",
+      "type 5, 5 points", `type ${pv.getInt32(32, true)}, ${pv.getInt32(108 + 4 + 36, true)} points`,
+      pv.getInt32(32, true) === 5 && pv.getInt32(108 + 4 + 36, true) === 5);
+
+    const dxf = writeDXF([{ name: "CH", colour: ACI.blue,
+      polylines: [{ pts: [[655000.5, 7738000.25], [655010, 7738020]] }] }]);
+    add(X3, "the DXF is R12, the last revision every reader in this field agrees on",
+      "AC1009", dxf.includes("AC1009") ? "AC1009" : "missing", dxf.includes("AC1009"));
+    // ⚠️ A UTM NORTHING IN EXPONENT NOTATION IS A PARSE ERROR, not a number, to
+    // most CAD readers — which is why the writer formats every coordinate fixed.
+    add(X3, "…and no coordinate is written in exponent notation, which a CAD "
+      + "reader takes as a parse error rather than as a number",
+      "none", /[0-9]e[+-][0-9]/i.test(dxf) ? "found" : "none",
+      !/[0-9]e[+-][0-9]/i.test(dxf));
+    add(X3, "…and full unshifted eastings survive, so the drawing sits where the "
+      + "survey put it rather than near the CAD origin",
+      "655000.500000 present",
+      dxf.includes("655000.500000") ? "present" : "absent",
+      dxf.includes("655000.500000"));
+  }
+
+  {
+    const X4 = "X4 · the graded context mesh, without cracks";
+    // ⚠️ A T-JUNCTION TILES PERFECTLY IN PLAN and shows only as pinholes in Z,
+    // so an area test passes a broken mesh. This checks the junctions directly.
+    const N = 128, C = 128;
+    const hole = { r0: 60, c0: 60, r1: 67, c1: 67 };
+    const q = quadtreeIndex(N, C, { hole });
+    const rc = (v) => [Math.floor(v / C), v % C];
+
+    let area = 0;
+    for (let i = 0; i < q.indices.length; i += 3) {
+      const [ar, ac] = rc(q.indices[i]);
+      const [br, bc] = rc(q.indices[i + 1]);
+      const [cr, cc] = rc(q.indices[i + 2]);
+      area += Math.abs((bc - ac) * (cr - ar) - (cc - ac) * (br - ar)) / 2;
+    }
+    let holeQuads = 0;
+    for (let r = 0; r < N - 1; r++) {
+      for (let c = 0; c < C - 1; c++) {
+        if (r + 1 >= hole.r0 && r <= hole.r1 && c + 1 >= hole.c0 && c <= hole.c1) holeQuads++;
+      }
+    }
+    add(X4, "the graded index covers exactly the quads outside the design "
+      + "patch's opening — no gap, no overlap",
+      String((N - 1) * (C - 1) - holeQuads), String(area),
+      area === (N - 1) * (C - 1) - holeQuads);
+
+    const used = new Set(q.indices);
+    let tj = 0;
+    const seen = new Set();
+    for (let i = 0; i < q.indices.length; i += 3) {
+      const t = [q.indices[i], q.indices[i + 1], q.indices[i + 2]];
+      for (let k = 0; k < 3; k++) {
+        const va = t[k], vb = t[(k + 1) % 3];
+        const key = va < vb ? va * 1e6 + vb : vb * 1e6 + va;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const [ar, ac] = rc(va), [br, bc] = rc(vb);
+        if (ar === br) {
+          for (let x = Math.min(ac, bc) + 1; x < Math.max(ac, bc); x++) if (used.has(ar * C + x)) tj++;
+        } else if (ac === bc) {
+          for (let y = Math.min(ar, br) + 1; y < Math.max(ar, br); y++) if (used.has(y * C + ac)) tj++;
+        }
+      }
+    }
+    add(X4, "…and NO vertex lies inside another triangle's edge — the T-junction "
+      + "a coverage test cannot see, because a crack tiles perfectly in plan",
+      "0", String(tj), tj === 0);
+
+    let viol = 0;
+    for (let r = 0; r < N - 1; r++) {
+      for (let c = 0; c < C - 1; c++) {
+        const lv = q.levels[r * (C - 1) + c];
+        if (lv < 0) continue;
+        for (const [dr, dc] of [[0, 1], [1, 0]]) {
+          const rr = r + dr, cc = c + dc;
+          if (rr >= N - 1 || cc >= C - 1) continue;
+          const o = q.levels[rr * (C - 1) + cc];
+          if (o >= 0 && Math.abs(lv - o) > 1) viol++;
+        }
+      }
+    }
+    add(X4, "…because neighbouring blocks never differ by more than one level, "
+      + "which is what makes a single edge midpoint enough to stitch them",
+      "0 violations", String(viol), viol === 0);
+
+    add(X4, "and the graded mesh is materially cheaper than the uniform one it "
+      + "replaces, which is the whole reason for it",
+      "fewer than half", `${q.triangles} vs ${2 * (N - 1) * (C - 1)}`,
+      q.triangles < (N - 1) * (C - 1));
+  }
+
+  {
+    const X5 = "X5 · what arrives from outside the patch";
+    // ⚠️ EXPECTATIONS ACCOUNT FOR THE BORDER RING. watershed.js makes every cell
+    // touching the tile edge an OUTLET whatever the ground does, so only
+    // INTERIOR cells can be counted. The first controls written for this
+    // assumed otherwise, and it was the CONTROL that was wrong.
+    const NN = 20, cellM = 4, A = cellM * cellM;
+    const zt = new Float32Array(NN * NN);
+    for (let r = 0; r < NN; r++) for (let c = 0; c < NN; c++) zt[r * NN + c] = 100 - r;
+    const tilt = new DEM(zt, NN, NN, cellM, 1000, 2000, "tilt");
+
+    const band = externalInflow(tilt, { r0: 10, c0: 0, r1: 11, c1: NN - 1 });
+    add(X5, "on ground tilted southward, the interior north of a band drains "
+      + "into it — the border ring cannot, being an outlet by convention",
+      `${9 * 18 * A} m²`, `${band.externalM2} m²`, band.externalM2 === 9 * 18 * A);
+    add(X5, "…and every crossing is reported on the side the cell actually LIES, "
+      + "not the direction the water travels",
+      "all N", [...new Set(band.crossings.map((c) => c.side))].join(","),
+      band.crossings.length > 0 && band.crossings.every((c) => c.side === "N"));
+
+    const ridge = externalInflow(tilt, { r0: 0, c0: 0, r1: 1, c1: NN - 1 });
+    add(X5, "a patch on the ridge receives nothing, and says so rather than "
+      + "reporting a small number",
+      "0 m², 0 crossings", `${ridge.externalM2} m², ${ridge.crossings.length} crossings`,
+      ridge.externalM2 === 0 && ridge.crossings.length === 0);
+
+    const NB = 21, cb = 2, mid = (NB - 1) / 2;
+    const zb = new Float32Array(NB * NB);
+    for (let r = 0; r < NB; r++) {
+      for (let c = 0; c < NB; c++) zb[r * NB + c] = (r - mid) * (r - mid) + (c - mid) * (c - mid);
+    }
+    const bowl = externalInflow(new DEM(zb, NB, NB, cb, 0, 0, "bowl"),
+      { r0: mid - 1, c0: mid - 1, r1: mid + 1, c1: mid + 1 });
+    add(X5, "a patch in a sink receives the whole interior of the tile",
+      `${((NB - 2) * (NB - 2) - 9) * cb * cb} m²`, `${bowl.externalM2} m²`,
+      bowl.externalM2 === ((NB - 2) * (NB - 2) - 9) * cb * cb);
+
+    // ⚠️ THE FIGURE IS A LOWER BOUND WHENEVER THE CATCHMENT REACHES THE EDGE:
+    // ground beyond the tile is not in the data, and the readout must not print
+    // an equality it cannot support.
+    add(X5, "…and a catchment that closes inside the tile is NOT flagged as "
+      + "truncated, so the flag means something when it is set",
+      "false", String(bowl.truncated), bowl.truncated === false);
+
+    const flat = new DEM(new Float32Array(30 * 30).fill(50), 30, 30, 1, 0, 0, "flat");
+    const fl = externalInflow(flat, { r0: 14, c0: 14, r1: 15, c1: 15 });
+    add(X5, "a dead-flat tile terminates and claims no inflow it cannot justify "
+      + "— depressions are not filled here, so a walk must not be able to cycle",
+      "0 m²", `${fl.externalM2} m²`, fl.externalM2 === 0);
+  }
+
+  // ── X6 · a drawing's stated scale, against its own geometry ───────────────
+  //
+  // ⚠️⚠️ THIS GROUP READS THE DRAWING, NOT THE CODE, and that is the whole point.
+  // Every other check on the exporters asks whether something is PRESENT — a
+  // hatch, a dashed set, a scale string. These ask whether what the sheet SAYS
+  // agrees with what it DREW. `section-designed.svg` declared "horizontal 1:100"
+  // while its own axes measured 1:52.5, and the suite stayed green, because a
+  // row asserted the string was there and nobody read the geometry back.
+  //
+  // A scale is a claim about millimetres per metre, and it is checkable from the
+  // file alone: the sheet states its width in millimetres, and its own labelled
+  // ticks say how many metres those millimetres span. Nothing below imports a
+  // number from the exporter.
+  //
+  // See output/FINDING-section-scale-overstated.md.
+  {
+    const X6 = "X6 · a drawing's stated scale, against its own geometry";
+
+    /** Millimetres per drawn unit, from the sheet's own width and viewBox. */
+    const mmPerUnit = (svg) => {
+      const head = svg.slice(0, 600);
+      const wmm = head.match(/width="([\d.]+)mm"/);
+      const vbw = head.match(/viewBox="0 0 ([\d.]+) /);
+      return wmm && vbw ? Number(wmm[1]) / Number(vbw[1]) : NaN;
+    };
+
+    /**
+     * The scale a sheet is ACTUALLY drawn at, read from its graphic scale bar.
+     *
+     * The bar is four rectangles of equal width — two divisions, each drawn as
+     * two halves — so the run spans 2 × barM metres, and the label at its right
+     * end says what that figure is.
+     *
+     * ⚠️ THE CUT/FILL BALANCE BAR ALSO CARRIES class="bar", and a two-row section
+     * sheet draws four of those. Matching on the class alone would have measured
+     * the balance bar and reported a scale from it. A scale bar's rectangles are
+     * filled flat or not at all; the balance bar's are filled with a hatch
+     * PATTERN, so the fill is what tells them apart.
+     */
+    const barScale = (svg) => {
+      const bars = [...svg.matchAll(
+        /<rect class="bar" fill="(none|#[0-9a-fA-F]{6})"[^>]*x="([-\d.]+)"[^>]*width="([\d.]+)"/g)];
+      if (bars.length < 4) return null;
+      const w0 = Number(bars[0][3]);
+      if (!bars.slice(0, 4).every((b) => Math.abs(Number(b[3]) - w0) < 0.01)) return null;
+      const x0 = Number(bars[0][2]), span = 4 * w0;
+      let metres = NaN;
+      for (const m of svg.matchAll(/<text class="axl" x="([-\d.]+)"[^>]*>(\d+)<\/text>/g)) {
+        if (Math.abs(Number(m[1]) - (x0 + span)) < 0.8) metres = Number(m[2]);
+      }
+      const mmPerM = (span / metres) * mmPerUnit(svg);
+      return metres > 0 && mmPerM > 0
+        ? { denom: 1000 / mmPerM, mmPerM, how: `bar ${span.toFixed(1)} mm over ${metres} m` }
+        : null;
+    };
+
+    /**
+     * The same figure read from a LABELLED AXIS — the reading the finding asked
+     * for, and the only one available on a sheet that draws no bar.
+     *
+     * Numeric tick labels sharing a y are a horizontal axis, ones sharing an x a
+     * vertical one. The longest run wins, which skips stray pairs such as the two
+     * slope labels down the side.
+     */
+    const axisScale = (svg, dir) => {
+      const pts = [];
+      for (const m of svg.matchAll(
+        /<text class="axl"[^>]*\sx="([-\d.]+)"[^>]*\sy="([-\d.]+)"[^>]*>([^<]*)<\/text>/g)) {
+        const t = m[3].trim();
+        if (/^-?\d+(?:\.\d+)?$/.test(t)) pts.push({ x: +m[1], y: +m[2], v: +t });
+      }
+      const runs = new Map();
+      for (const q of pts) {
+        const key = (dir === "h" ? q.y : q.x).toFixed(1);
+        if (!runs.has(key)) runs.set(key, []);
+        runs.get(key).push(q);
+      }
+      let best = null;
+      for (const r of runs.values()) if (!best || r.length > best.length) best = r;
+      if (!best || best.length < 3) return null;
+      const lo = best.reduce((a, b) => (b.v < a.v ? b : a));
+      const hi = best.reduce((a, b) => (b.v > a.v ? b : a));
+      const dv = hi.v - lo.v;
+      // y grows downward, so a higher value sits at a SMALLER y
+      const du = dir === "h" ? hi.x - lo.x : lo.y - hi.y;
+      if (!(dv > 0) || !(du > 0)) return null;
+      const mmPerM = (du / dv) * mmPerUnit(svg);
+      return mmPerM > 0
+        ? { denom: 1000 / mmPerM, mmPerM,
+          how: `${best.length} ticks, ${du.toFixed(1)} mm over ${Number(dv.toFixed(4))} m` }
+        : null;
+    };
+
+    const measured = (svg, dir) =>
+      (dir === "h" ? barScale(svg) : null) || axisScale(svg, dir);
+    const num = (svg, re) => { const m = svg.match(re); return m ? Number(m[1]) : NaN; };
+    const agrees = (m, stated) => !!m && Number.isFinite(stated)
+      && Math.abs(m.denom - stated) / m.denom <= 0.02;
+    const reads = (m) => (m ? `1:${m.denom.toFixed(1)} — ${m.how}`
+      : "NOTHING MEASURABLE ON THE SHEET");
+
+    // ⚠️⚠️ THE INSTRUMENT IS CALIBRATED BEFORE IT IS USED. Every row below this
+    // one fails, and a reader that simply never agreed with anything would fail
+    // them just as loudly while proving nothing. So two hand-built sheets whose
+    // true scale is known by construction are measured first: if these two do
+    // not pass, no failure underneath them means anything.
+    {
+      // 40 mm of bar across 8 m of ground = 5 mm/m = 1:200.
+      const bar200 = '<svg width="200mm" height="200mm" viewBox="0 0 200 200">'
+        + '<rect class="bar" fill="none" x="20.00" y="10" width="10.00" height="2"/>'
+        + '<rect class="bar" fill="#1c1a16" x="30.00" y="10" width="10.00" height="2"/>'
+        + '<rect class="bar" fill="none" x="40.00" y="10" width="10.00" height="2"/>'
+        + '<rect class="bar" fill="#1c1a16" x="50.00" y="10" width="10.00" height="2"/>'
+        + '<text class="axl" x="20.00" y="18">0</text>'
+        + '<text class="axl" x="40.00" y="18">4</text>'
+        + '<text class="axl" x="60.00" y="18">8</text></svg>';
+      const b = barScale(bar200);
+      add(X6, "the scale reader is calibrated on a bar whose scale is known by "
+        + "construction, before it is trusted to fail anything",
+        "1:200", b ? `1:${b.denom.toFixed(1)}` : "UNREADABLE",
+        !!b && Math.abs(b.denom - 200) < 0.5);
+
+      // 100 mm of axis across 10 m = 10 mm/m = 1:100. Half-size sheet, so the
+      // viewBox is NOT millimetres and the width attribute has to be honoured.
+      const ax100 = '<svg width="100mm" height="100mm" viewBox="0 0 200 200">'
+        + '<text class="axl" x="40.00" y="150.00">0</text>'
+        + '<text class="axl" x="140.00" y="150.00">5</text>'
+        + '<text class="axl" x="240.00" y="150.00">10</text></svg>';
+      const a = axisScale(ax100, "h");
+      add(X6, "…and on a labelled axis, on a sheet whose viewBox is not "
+        + "millimetres — the width attribute is what turns units into paper",
+        "1:100", a ? `1:${a.denom.toFixed(1)}` : "UNREADABLE",
+        !!a && Math.abs(a.denom - 100) < 0.5);
+    }
+
+    const mk = () => DEM.synthetic(64, 64, 0.5, (r, c) => 100 + c * 0.5 * 0.08);
+    const plans = [
+      ["the grading plan", gradingSVG(mk(), { interval: 0.5 })],
+      ["the isopach sheet", isopachSVG(mk(), { baseline: mk().z.slice() })],
+      ["the slope-class sheet", slopeClassSVG(mk(), { baseline: mk().z.slice() })],
+      ["the drainage sheet", drainageSVG(mk(), { baseline: mk().z.slice() })],
+    ];
+    for (const [name, svg] of plans) {
+      const m = measured(svg, "h"), stated = num(svg, /scale 1:([\d.]+)/);
+      add(X6, `${name} is drawn at the scale it prints — the caption and the `
+        + "geometry under it are the same claim, measured against each other",
+        `1:${stated}`, reads(m), agrees(m, stated));
+    }
+
+    // ⚠️ A SHEET THAT NAMES A SCALE MUST DRAW A BAR. A printed ratio is true at
+    // exactly one reproduction size; a bar stays true at every size. This is the
+    // second half of the same defect, and it is why a bar is not merely nice to
+    // have on a sheet that has already printed "1:20".
+    const chain = chainageSectionsSVG(mk(), [[2, 8], [30, 8]], {});
+    // ⚠️ NOW THAT IT CARRIES A BAR, ITS RATIO CAN BE CHECKED AT ALL. Before the
+    // bar was added this sheet could not be measured in either direction, so its
+    // overstatement was invisible rather than absent.
+    {
+      const m = barScale(chain), stated = num(chain, /1:([\d.]+) across/);
+      add(X6, "the chainage sections are drawn at the scale they print — the "
+        + "across-band figure, which every offset on the sheet is read against",
+        `1:${stated}`, reads(m), agrees(m, stated));
+    }
+    for (const [name, svg] of [...plans, ["the chainage sections", chain]]) {
+      if (!/1:\d/.test(svg)) continue;
+      add(X6, `${name} names a scale, so it also draws a graphic bar — a printed `
+        + "ratio is true at one reproduction size and a bar at all of them",
+        "a scale bar", barScale(svg) ? "present" : "NO BAR", !!barScale(svg));
+    }
+
+    {
+      const dem = DEM.synthetic(20, 20, 0.5, (r, c) => 10 + c * 0.05);
+      const base = dem.z.slice();
+      for (let i = 0; i < dem.z.length; i++) dem.z[i] -= 0.1;
+      const prof = sampleSection(dem, [1, 5], [8, 5], { baseline: base });
+      const svg = sectionSVG([{ name: "A", profile: prof, areas: sectionAreas(prof) }],
+        { site: "test", crs: "EPSG:25833" });
+      const h = num(svg, /horizontal 1:([\d.]+)/), v = num(svg, /vertical 1:([\d.]+)/);
+      const mh = measured(svg, "h"), mv = axisScale(svg, "v");
+
+      add(X6, "the section is drawn at the horizontal scale it prints — the figure "
+        + "a chainage is read off has to survive being measured",
+        `1:${h}`, reads(mh), agrees(mh, h));
+      add(X6, "…and at the vertical scale it prints, which is the one every depth "
+        + "on the sheet is read against",
+        `1:${v}`, reads(mv), agrees(mv, v));
+
+      // ⚠️ THE SECTION'S BAR USED TO LIVE INSIDE THE PLAN STRIP, so a sheet
+      // exported without a plan band stated a scale and drew nothing to check it
+      // against — the case section-designed.svg is. This row is why that cannot
+      // come back.
+      add(X6, "the section names a scale, so it draws a graphic bar too — even "
+        + "when it carries no plan strip, which is the export that had none",
+        "a scale bar", barScale(svg) ? "present" : "NO BAR", !!barScale(svg));
+
+      // ⚠️⚠️ THE EXAGGERATION IS NOT AUTOMATICALLY SAVED BY BEING A RATIO. On the
+      // sheet the finding measured, the two roundings happened to cancel, so the
+      // exaggeration came out right while both absolute scales were wrong — which
+      // is why that sheet's argument survived. THAT WAS LUCK, NOT STRUCTURE. Round
+      // 1:10.2 up to 1:20 and 1:7.5 up to 1:10 and they do not cancel. So the
+      // printed exaggeration is checked against the two MEASURED axes, never
+      // against the two printed scales: those agree with each other by
+      // construction and would pass while the drawing disagreed with both.
+      const ex = num(svg, /vertical exaggeration ([\d.]+)×/);
+      const comp = num(svg, /vertically compressed ([\d.]+)×/);
+      const printed = Number.isFinite(ex) ? ex
+        : Number.isFinite(comp) ? 1 / comp
+          : /true to scale/.test(svg) ? 1 : NaN;
+      const trueEx = mh && mv ? mv.mmPerM / mh.mmPerM : NaN;
+      add(X6, "…and the exaggeration it prints is the one the drawing actually has, "
+        + "measured off the two axes rather than inferred from the two captions",
+        Number.isFinite(trueEx) ? `${trueEx.toFixed(2)}× from the axes` : "measurable",
+        Number.isFinite(printed) ? `${printed.toFixed(2)}× printed` : "NOT STATED",
+        Number.isFinite(trueEx) && Number.isFinite(printed)
+          && Math.abs(printed - trueEx) / trueEx <= 0.02);
+    }
+  }
+
+  // ── X7 · attractors and repellers ────────────────────────────────────────
+  //
+  // Marc, 2026-09-27: "if you draw a curve it can be activated as an attractor …
+  // 1 could be fully pulled to the curve, 0 is nothing and -1 is pushed the same
+  // distance into the other direction … this could work also with points … like
+  // the same as in GIS vector features points, lines and polygons."
+  //
+  // ⚠️ THE GEOMETRY IS PLACED ON A CELL CENTRE WHEREVER A WEIGHT OF 1 IS WANTED.
+  // Centres sit at 0.25, 0.75, … so a line at y = 16 has NO cell on it: the
+  // nearest is 0.25 m away, weight 0.9957, and a test asserting "lands exactly
+  // on the curve" then fails by 15 mm against a kernel that is perfectly right.
+  // That cost one full round of false failures while this group was written —
+  // suspect the harness before the kernel, as §6.8 keeps saying.
+  //
+  // ⚠️ AND EXPECTATIONS ARE SNAPSHOTTED, NOT RECOMPUTED. The synthetic ground is
+  // built from the cell INDEX, so re-deriving a height from a world coordinate
+  // disagrees with it by a fraction of a cell — the second false failure.
+  {
+    const X7 = "X7 · attractors and repellers — vector geometry that pulls the ground";
+    const aMk = () => DEM.synthetic(64, 64, 0.5, (r, c) => 100 + c * 0.5 * 0.1);
+    const aIdx = (d, x, y) => Math.round((d.originY + d.nrows * d.cell - y) / d.cell - 0.5) * d.ncols
+      + Math.round((x - d.originX) / d.cell - 0.5);
+    const aAt = (d, x, y) => d.z[aIdx(d, x, y)];
+    const ON_X = 15.75, ON_Y = 16.25;                 // an exact cell centre
+    const LINE = { kind: "line", pts: [[2, ON_Y], [30, ON_Y]] };
+    const LOPT = { strength: 1, radius: 6, along: "level", datum: 105 };
+
+    {
+      const d = aMk();
+      const r = attract(d, LINE, { ...LOPT, strength: 0 });
+      add(X7, "a strength of zero moves nothing at all — the slider's centre is a "
+        + "true no-op, not a very small edit", "0 cells", `${r.cells} cells`, r.cells === 0);
+    }
+    {
+      const d = aMk(), z0 = aAt(d, ON_X, ON_Y);
+      attract(d, LINE, LOPT);
+      add(X7, "at strength 1 a cell lying ON the curve is pulled exactly onto it — "
+        + "fully attracted means fully, to the last millimetre",
+        "105", `${aAt(d, ON_X, ON_Y)} (was ${z0.toFixed(3)})`, aAt(d, ON_X, ON_Y) === 105);
+    }
+    {
+      // ⚠️⚠️ THE MIRROR IS THE WHOLE POINT OF THE SLIDER, so it is checked on
+      // EVERY cell rather than on one: −t must move each cell the same distance
+      // as +t in the opposite direction, whatever the falloff is worth there.
+      const z0 = aMk().z.slice();
+      const up = aMk(), dn = aMk();
+      attract(up, LINE, { ...LOPT, strength: 0.6 });
+      attract(dn, LINE, { ...LOPT, strength: -0.6 });
+      let worst = 0, moved = 0;
+      for (let i = 0; i < z0.length; i++) {
+        const a = up.z[i] - z0[i], b = dn.z[i] - z0[i];
+        if (a) moved++;
+        worst = Math.max(worst, Math.abs(a + b));
+      }
+      add(X7, "…and a repeller is the attractor mirrored: −t moves every cell the "
+        + "same distance the other way, which is what makes one slider honest",
+        "0 across all cells", `${worst.toExponential(1)} over ${moved} cells`,
+        worst === 0 && moved > 0);
+    }
+    {
+      const d = aMk(), far = aAt(d, 16, 4), beyond = aAt(d, 31.5, ON_Y);
+      attract(d, LINE, LOPT);
+      add(X7, "nothing beyond the radius moves — influence is bounded, so an "
+        + "attractor cannot quietly restate the whole site",
+        "unchanged", aAt(d, 16, 4) === far ? "unchanged" : "MOVED", aAt(d, 16, 4) === far);
+      // ⚠️ The guide corridor's own finding, inherited: a clamped projection gives
+      // round caps and sweeps bowls past the ends of a line nobody drew there.
+      add(X7, "…and the ends are square, not round caps — a cell past the last "
+        + "vertex is not beside the line",
+        "unchanged", aAt(d, 31.5, ON_Y) === beyond ? "unchanged" : "MOVED",
+        aAt(d, 31.5, ON_Y) === beyond);
+    }
+    {
+      const d = aMk();
+      d.z[aIdx(d, 16, ON_Y)] = NaN;
+      attract(d, LINE, { ...LOPT, radius: 20 });
+      add(X7, "a hole in the DEM stays a hole — an attractor may not invent ground "
+        + "that was never surveyed", "NaN",
+        Number.isNaN(d.z[aIdx(d, 16, ON_Y)]) ? "NaN" : "filled",
+        Number.isNaN(d.z[aIdx(d, 16, ON_Y)]));
+    }
+    {
+      const d = aMk(), copy = d.z.slice();
+      const dry = attract(d, LINE, { ...LOPT, dryRun: true });
+      const led = new Ledger();
+      const wet = attract(aMk(), LINE, { ...LOPT, ledger: led });
+      const still = copy.every((v, i) => Object.is(v, d.z[i]));
+      add(X7, "a dry run prices the earthwork without moving a single cell, and "
+        + "prices it identically to the edit that does",
+        "same figures, no movement",
+        `${still ? "no movement" : "MOVED"}, net ${dry.net.toFixed(1)} vs ${wet.net.toFixed(1)} m³`,
+        still && dry.cells === wet.cells && Math.abs(dry.net - wet.net) < 1e-9);
+      add(X7, "…and the ledger ACCUMULATES it, because an attractor is one more "
+        + "earthwork on the same site rather than a replacement for the last",
+        `cut ${wet.cut.toFixed(1)} fill ${wet.fill.toFixed(1)}`,
+        `cut ${led.cut.toFixed(1)} fill ${led.fill.toFixed(1)}`,
+        Math.abs(led.cut - wet.cut) < 1e-9 && Math.abs(led.fill - wet.fill) < 1e-9);
+    }
+    {
+      const bad = Object.entries(FALLOFF).filter(([, f]) =>
+        !(Math.abs(f.w(0, 6) - 1) < 1e-12 && Math.abs(f.w(6, 6)) < 1e-12
+          && f.w(1, 6) > f.w(3, 6) && f.w(3, 6) > f.w(5, 6)));
+      add(X7, "every falloff is 1 on the geometry, 0 at the radius and never rises "
+        + "in between — the shape may change, the contract may not",
+        `all ${Object.keys(FALLOFF).length} well formed`,
+        bad.length ? bad.map(([k]) => k).join(", ") : `all ${Object.keys(FALLOFF).length} well formed`,
+        bad.length === 0);
+    }
+    {
+      const d = aMk(), P2 = [23.75, 24.25], gap = aAt(aMk(), 19.75, 20.25);
+      attract(d, { kind: "point", pts: [[ON_X, ON_Y], P2] }, { strength: 1, radius: 5, datum: 110 });
+      add(X7, "a point attractor pulls the cell beneath it exactly onto the point, "
+        + "and with several points the NEAREST one governs",
+        "110 and 110", `${aAt(d, ON_X, ON_Y)} and ${aAt(d, P2[0], P2[1])}`,
+        aAt(d, ON_X, ON_Y) === 110 && aAt(d, P2[0], P2[1]) === 110);
+      add(X7, "…and the ground between two points, out of reach of both, is left "
+        + "exactly as it was", `${gap}`, `${aAt(d, 19.75, 20.25)}`,
+        aAt(d, 19.75, 20.25) === gap);
+    }
+    {
+      const ring = [[9.75, 9.75], [22.25, 9.75], [22.25, 22.25], [9.75, 22.25]];
+      const base = aMk();
+      const collar0 = aAt(base, 24.25, ON_Y), out0 = aAt(base, 27.25, ON_Y);
+      const d = aMk();
+      attract(d, { kind: "polygon", pts: ring }, { strength: 1, radius: 4, datum: 103 });
+      add(X7, "a closed polygon at strength 1 brings its whole inside to the target, "
+        + "like a platform", "103", `${aAt(d, ON_X, ON_Y)}`, aAt(d, ON_X, ON_Y) === 103);
+      add(X7, "…with a graded collar outside the ring rather than a cliff at it",
+        "moved", Math.abs(aAt(d, 24.25, ON_Y) - collar0) > 1e-9 ? "moved" : "UNCHANGED",
+        Math.abs(aAt(d, 24.25, ON_Y) - collar0) > 1e-9);
+      add(X7, "…and the collar stops at the radius, leaving the ground beyond it "
+        + "untouched", `${out0}`, `${aAt(d, 27.25, ON_Y)}`, aAt(d, 27.25, ON_Y) === out0);
+    }
+    {
+      // ⚠️⚠️ A POINT'S ELEVATION IS ITS OWN, AND THIS IS THE ROW THAT CAUGHT IT.
+      // With the target re-read from the ground each call, applying one point
+      // attractor twice priced MORE fill the second time (113.7 → 149.3 m³ in
+      // the app) because the first pass had lifted the ground under the point
+      // and the target rose with it. A point in space does not move when the
+      // ground does.
+      const d = aMk();
+      const P = [[ON_X, ON_Y, 130]];
+      const first = attract(d, { kind: "point", pts: P }, { strength: 0.5, radius: 5 });
+      const second = attract(d, { kind: "point", pts: P }, { strength: 0.5, radius: 5 });
+      add(X7, "a point carries its own elevation, so pulling twice converges on "
+        + "it instead of chasing the ground upward",
+        "the second pass costs less than the first",
+        `${first.fill.toFixed(1)} then ${second.fill.toFixed(1)} m³`,
+        second.fill < first.fill && second.fill > 0);
+      add(X7, "…and a point given no elevation of its own falls back to the "
+        + "ground beneath it, which is what an imported point without a Z gives",
+        "moves the ground", `${attract(aMk(), { kind: "point", pts: [[ON_X, ON_Y]] },
+          { strength: 1, radius: 5, offset: 2 }).cells} cells`,
+        attract(aMk(), { kind: "point", pts: [[ON_X, ON_Y]] },
+          { strength: 1, radius: 5, offset: 2 }).cells > 0);
+    }
+    {
+      // ⚠️ SAYING THIS OUT LOUD BECAUSE THE SLIDER INVITES THE OPPOSITE BELIEF.
+      // −1 is not undo. The second pass mirrors the displacement it finds NOW,
+      // and the first pass already changed what it finds. Reversal is the
+      // history stack's job; this is a design gesture, not a transform.
+      const d = aMk(), z0 = aAt(d, ON_X, ON_Y);
+      attract(d, LINE, LOPT);
+      attract(d, LINE, { ...LOPT, strength: -1 });
+      add(X7, "attracting and then repelling does NOT restore the ground — the "
+        + "slider is a gesture, not an inverse, and undo is what reverses it",
+        "not restored", `${z0.toFixed(3)} → ${aAt(d, ON_X, ON_Y).toFixed(3)}`,
+        Math.abs(aAt(d, ON_X, ON_Y) - z0) > 1e-6);
+    }
   }
 
   // Performance was measured at the top, on a clean heap. Reported last.

@@ -19,6 +19,39 @@
 // any individual plant. planning/02 §5.7 (Morphos' teaching-mode vocabulary)
 // governs the wording everywhere this layer is shown.
 //
+// SHANNON H' — THE CREDIT THIS MODULE OWED AND DID NOT CARRY (added 2026-08-27).
+//
+// Shannon C. E. (1948), "A Mathematical Theory of Communication", Bell System
+// Technical Journal 27 (3): 379-423. H = -Σ p log p is his, and he wrote it for
+// TELECOMMUNICATIONS — the average uncertainty of a message source. Nothing in
+// that paper is about species; ecology borrowed the formula afterwards, through
+// MacArthur (1955), Ecology 36 (3): 533-536 among others, with evenness against
+// a maximum following Pielou (1966), J. Theor. Biol. 13: 131-144.
+//
+// ⚠⚠ IT IS "SHANNON", NOT "SHANNON-WEAVER". Warren Weaver co-authored the 1949
+// BOOK that reprinted the paper with an expository essay; he did not devise the
+// index, and the compound name is a citation error that ecology textbooks
+// carried for decades. "Shannon-Wiener" credits Norbert Wiener's independent
+// entropy work and is defensible, but it is not how this formula reached print.
+// This module says Shannon.
+//
+// ⚠⚠ AND AN ENTROPY IS NOT A DIVERSITY. Hill (1973), Ecology 54 (2): 427-432 and
+// Jost (2006), "Entropy and diversity", Oikos 113 (2): 363-375: H' is an entropy
+// in NATS (this file uses Math.log, so nats, not bits), and the interpretable
+// quantity is the EFFECTIVE NUMBER OF SPECIES, exp H'. Differences in H' are not
+// proportional to differences in diversity. On the ECLAS six-case sheet that
+// distinction is the difference between "1.097 against 1.776", which reads as a
+// modest gap, and "3.0 effective species against 5.9 of a possible 7", which is
+// the same fact and says what it means. Nothing here converts — the readout
+// reports H' against SHANNON_MAX — but anything QUOTING this number in prose
+// should convert, or say "entropy" and not "diversity".
+//
+// ⚠ WHY THE CREDIT MATTERS HERE SPECIFICALLY. geomorphons.js opens by crediting
+// Jasiewicz & Stepinski for the method it implements. This module implemented
+// Shannon's and credited nobody, which is the same asymmetry the ECLAS abstract
+// had to repair at revision 024 when a listed reference turned out to be cited
+// nowhere. Standing rule 5: credit, attribution, licence care.
+//
 // METHOD. Fuzzy habitat suitability, the standard HSI shape: each species has a
 // trapezoidal tolerance curve per environmental axis, and the memberships are
 // combined by GEOMETRIC MEAN so that a zero on any one axis zeroes the species.
@@ -516,8 +549,9 @@ export function assemble(g) {
     classified++;
   }
 
-  // Shannon H' over the REALISED assemblage — the species actually holding
-  // ground, not the ones the table lists. Deliberately the same mathematics as
+  // Shannon H' (SHANNON 1948 — see the credit in this file's header, and the
+  // note there that an entropy is not a diversity) over the REALISED assemblage
+  // — the species actually holding ground, not the ones the table lists. Deliberately the same mathematics as
   // geodiversityFromTRI so the two readouts are legible side by side, but
   // reported in nats rather than as evenness, because the storyboard's claim is
   // about the count of habitats as much as their balance.
@@ -546,6 +580,9 @@ export function assemble(g) {
 
 /**
  * The maximum H' this list can reach — every species holding an equal share.
+ * ln(n) in nats, which is ln 7 = 1.9459 for the current list. Reporting H'
+ * against it is Pielou's evenness (PIELOU 1966) written as a pair rather than a
+ * ratio, so a reader can see both the value and its ceiling.
  * Shown beside the live figure so the number has a ceiling a reader can judge
  * it against, rather than being an unscaled quantity that means nothing alone.
  */

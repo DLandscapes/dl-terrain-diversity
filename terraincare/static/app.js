@@ -38,14 +38,15 @@ import {
 } from "./pattern.js";
 import { niceInterval, contourSegments } from "./contours.js";
 import { History, captureRect, applyEdit } from "./history.js";
-import { sampleSection, sectionAreas, sectionName, sectionSVG } from "./section.js";
+import { extendToTile, sampleSection, sectionAreas, sectionName, sectionSVG } from "./section.js";
 import { SectionOverlay } from "./section-view.js";
 import { DimensionFrame } from "./dimensions.js";
 import { readOrthoTIFF, drapeOnto } from "./ortho.js";
 import { readPhoto } from "./photos.js";
 import { RULE_LAYERS, maskFromRule, maskRect, describeRules } from "./rules.js";
 import { SelectionOverlay } from "./selection-view.js";
-import { demoTileHeights, DEMO_PATCHES } from "./demotile.js";
+import { demoTileHeights, DEMO_PATCHES, DEMO_DIVISIONS } from "./demotile.js";
+import { DemoGridOverlay } from "./demogrid.js";
 /** The one tile name that is built rather than fetched. */
 const GENERATED_TILE = "generated/sixteen-deformations";
 import { SelectionStack, composeStack, describeStack, surfaceStamp, stale,
@@ -56,7 +57,8 @@ import { compareAt, compareSchemes, measureSurface, matchUniformInterval,
 import { landformPatches } from "./patches.js";
 import { geomorphons, LANDFORMS } from "./analysis/geomorphons.js";
 import { PatchOverlay } from "./patch-view.js";
-import { applyGuide, PROFILES, ALONG } from "./guide.js";
+import { applyGuide, PROFILES, ALONG, groundAt } from "./guide.js";
+import { attract, FALLOFF } from "./attract.js";
 import { PhotoOverlay, nearestPin } from "./photo-view.js";
 import {
   drawHUD, hypsometry, aspectRose, histogram, drawWaterBodies, fmtVolume,
@@ -66,7 +68,7 @@ import { PondPins } from "./pond-view.js";
 import { SectionFace } from "./section-face.js";
 import { symbolField, strideFor, symbolLegend } from "./symbols.js";
 import { gradingSVG } from "./export/grading.js";
-import { isopachSVG, slopeClassSVG, drainageSVG, chainageSectionsSVG }
+import { isopachSVG, slopeClassSVG, drainageSVG, chainageSectionsSVG, PROVENANCE }
   from "./export/derivatives.js";
 import { SymbolField } from "./symbol-view.js";
 import { GlyphField } from "./glyph-view.js";
@@ -77,18 +79,23 @@ import { INFO } from "./info.js";
 import { computeGradient } from "./analysis/horn.js";
 import { pondWater, absorbedDepth, INFILTRATION } from "./analysis/ponding.js";
 import { WaterField } from "./water.js";
+import { externalInflow } from "./analysis/inflow.js";
+import { InflowOverlay } from "./inflow-view.js";
 import {
   PlanSet, PLAN_FIELDS, pickVertex, pickRegion, ringIsValid, pointInRings,
   regionArea, regionExtent, levelCost, toFeatures, groundPerPixel,
 } from "./plan.js";
 import { PlanOverlay } from "./plan-view.js";
 import { readShapefile, prjEpsg, overlapsTerrain } from "./export/shapefile-read.js";
-import { writeVoxelSolidOBJ, blockClasses, manifoldReport } from "./export/solid.js";
+import { writeVoxelSolidOBJ, blockClasses, blockLevels, manifoldReport }
+  from "./export/solid.js";
 import { writeGeoTIFF } from "./export/geotiff-write.js";
 import { writeOBJ, writeVoxelOBJ } from "./export/obj.js";
 import { composeFigure } from "./export/figure.js";
 import { makeZip } from "./export/zip.js";
 import { writeShapefile, writeGeoJSON } from "./export/shapefile.js";
+import { channelReaches, catchmentPolygons, CHANNEL_CLASSES } from "./export/network.js";
+import { writeDXF, ACI } from "./export/dxf.js";
 
 const $ = (id) => /** @type {HTMLElement} */ (document.getElementById(id));
 
@@ -188,6 +195,14 @@ const state = {
    * @type {import("./dive.js").Dive|null}
    */
   dive: null,
+  /**
+   * What the context contributes — the first reading taken FROM the backdrop
+   * rather than of the patch. See setInflow().
+   */
+  inflow: {
+    /** @type {import("./inflow-view.js").InflowOverlay|null} */ overlay: null,
+    /** @type {import("./analysis/inflow.js").Inflow|null} */ last: null,
+  },
   /**
    * PATTERN STAMPING. A field of relief specified rather than brushed — see
    * pattern.js. `src` holds the raw source at its own size (an image's pixels,
@@ -338,11 +353,18 @@ const state = {
     /** @type {{id:number, name:string, a:number[], b:number[]}[]} */ list: [],
     /** the first click of a section being cut, or null */
     /** @type {number[]|null} */ pending: null,
+    /** where the cursor is while a section is being drawn, world XY, or null */
+    /** @type {number[]|null} */ hover: null,
+    /** shift held: the run is constrained orthogonal */
+    shift: false,
     /** @type {import("./section-view.js").SectionOverlay|null} */ overlay: null,
     nextId: 1,
     /** profiles folded flat about their traces, for reading in plan */
     folded: false,
   },
+
+  /** the opening tile's 4x4 cell division, drawn only for the generated tile */
+  /** @type {import("./demogrid.js").DemoGridOverlay|null} */ demoGrid: null,
 
   /**
    * ⚠️ THE ORTHOPHOTO DRAPE — LICENCE-RESTRICTED, LOCAL, AND NEVER EXPORTED.
@@ -971,10 +993,37 @@ async function adoptDEM(dem, name) {
   // would break it. Restore by returning `legible` instead of 1.
   const legible = ratio > 0 ? Math.min(8, Math.max(1, Math.round((0.22 / ratio) * 2) / 2)) : 1;
   void legible;
-  const suggested = 1;
+  /**
+   * ⚠️⚠️ 2.0×, BY MARC'S DECISION (2026-09-02: "scale the default mesh z by 2",
+   * asked for so the contours read more clearly). THIS REVERSES THE PIN AT 1.0
+   * and the note that set it is worth quoting, because its argument is not the
+   * value — it is the declaration:
+   *
+   *   "Hiding the slider while `adoptDEM` went on auto-suggesting a factor —
+   *    4.5x on the opening tile — would have left the terrain silently
+   *    distorted with nothing on screen saying by how much … A distortion
+   *    nobody declares is worse than a distortion nobody can adjust."
+   *
+   * So the pin is lifted and the declaration is ADDED rather than left out:
+   * Display › Surface now states the factor in words on every tile load, and
+   * `syncExaggerationNote` keeps it true. A FIXED, STATED 2.0× is a different
+   * thing from an auto-suggested 4.5× nobody was told about.
+   *
+   * ⚠️ IT IS STILL NOT `legible`. The auto-suggestion above stays dead: a factor
+   * that changes per tile means two tiles cannot be compared by eye, which is
+   * the failure the pin was defending against and the reason `legible` is
+   * computed and thrown away rather than deleted.
+   *
+   * ⚠️ AND IT DOES NOT TOUCH THE DRAWINGS. `section.js` derives its own
+   * `drawnEx` from the geometry it draws and deliberately ignores this — see
+   * its note about a 1:100 sheet once printing "4.5×" because that was the
+   * 3-D view's factor. The sections stay honest at any view exaggeration.
+   */
+  const suggested = 2;
   const exSlider = /** @type {HTMLInputElement} */ ($("ex"));
   exSlider.value = String(suggested);
   $("ex-val").textContent = `${suggested.toFixed(1)}×`;
+  syncExaggerationNote();
 
   buildRepresentation({ reframe: true });
 
@@ -1199,9 +1248,40 @@ function buildRepresentation(opts = {}) {
   // it went with the old one. Contours are re-derived rather than carried
   // across: they are geometry, not state.
   syncContours();
+  refreshDemoGrid();
   if (state.representation === "voxel") syncBlockLabel();
   if (keepCam) view.setCameraState(keepCam, 0);
   else view.frame(rep.boundingBox());
+}
+
+/**
+ * The opening tile's own 4 x 4 division, drawn on the ground it describes.
+ *
+ * ⚠⚠ ONLY FOR THE GENERATED TILE, and the guard is the point. The division is
+ * TRUE of `demotile.js`'s surface — sixteen cells, one deformation each, taken
+ * in order along PATTERN_RANGE — and FALSE of Ørndalen. Ruling a 4 x 4 grid over
+ * surveyed ground would assert a structure the ground does not have, which is
+ * the same class of error as a caption describing a figure that is not there.
+ *
+ * ⚠ IT KEYS ON THE TILE'S OWN NAME, which is rewritten precisely so the
+ * generated surface can be told apart from the teaching tile it borrows its
+ * header from — see the provenance note in `loadTile`.
+ *
+ * Rebuilt from `buildRepresentation` because the lines are DRAPED: they carry
+ * the ground's heights in their vertices, so a new surface makes them stale.
+ */
+function refreshDemoGrid() {
+  if (state.demoGrid) {
+    view.scene.remove(state.demoGrid.group);
+    state.demoGrid.dispose();
+    state.demoGrid = null;
+  }
+  if (!state.dem || state.dem.name !== GENERATED_TILE) return;
+  state.demoGrid = new DemoGridOverlay(state.dem, {
+    verticalExaggeration: currentExaggeration(),
+    divisions: DEMO_DIVISIONS,
+  });
+  view.scene.add(state.demoGrid.group);
 }
 
 /**
@@ -1923,6 +2003,29 @@ $("redo").addEventListener("click", () => stepHistory("redo"));
 function currentExaggeration() {
   return parseFloat(/** @type {HTMLInputElement} */ ($("ex")).value);
 }
+
+/**
+ * Say, in words, how much the view is stretching the ground.
+ *
+ * ⚠️ THIS IS THE CONDITION ON WHICH THE 1.0 PIN WAS LIFTED. The control is
+ * still hidden — Marc removed it deliberately — but the FACTOR is not, because
+ * the objection recorded against a non-unity default was never the distortion,
+ * it was a distortion nobody is told about. At 1.0× it says so too rather than
+ * going quiet, so the absence of a note can never be mistaken for "no
+ * exaggeration".
+ */
+function syncExaggerationNote() {
+  const el = $("ex-note");
+  if (!el) return;
+  const v = currentExaggeration();
+  el.hidden = false;
+  el.innerHTML = v === 1
+    ? `Vertical exaggeration <b>1.0×</b> — the ground is drawn true.`
+    : `Vertical exaggeration <b>${v.toFixed(1)}×</b> — heights in the 3-D view are `
+      + `stretched by this much so the relief reads. Plan distances, the ledger's `
+      + `volumes and every exported drawing are unaffected; a section states its `
+      + `own scale, measured from the drawing rather than from the view.`;
+}
 function brushCfg() {
   const cfg = {
     tool: state.tool,
@@ -1999,7 +2102,63 @@ function photoAt(e) {
   });
 }
 
+/**
+ * The section head under the pointer, or null.
+ *
+ * ⚠️ IT ASKS THE OVERLAY WHERE ITS MARKS ARE rather than recomputing the
+ * placement — see `SectionOverlay.heads`. The same rule the photo pins follow:
+ * the thing that draws a mark owns where the mark is.
+ *
+ * ⚠️ AND IT IS A SCREEN-SPACE TEST, in pixels, not a world-space one. The heads
+ * are a fixed size in metres, so in perspective a far head is a few pixels
+ * across and a near one is fifty; a world-space radius would make the far end
+ * of a section almost impossible to hit and the near end greedy.
+ * @param {PointerEvent|MouseEvent} e
+ */
+function sectionHeadAt(e) {
+  const ov = state.sections.overlay;
+  if (!ov || !ov.heads.length || !state.dem || !ov.group.visible) return null;
+  const rect = view.canvas.getBoundingClientRect();
+  const px = e.clientX - rect.left, py = e.clientY - rect.top;
+  view.camera.updateMatrixWorld();
+  const ex = currentExaggeration();
+  const v = new THREE.Vector3();
+  // Generous, because the letter is the target the eye picks and the letter is
+  // small. Sixteen pixels is about half a fingertip and well inside the gap
+  // between the two heads of any section worth cutting.
+  const R = 16;
+  let best = null, bestD = R * R;
+  for (const h of ov.heads) {
+    v.set(h.x, h.y, h.z * ex).project(view.camera);
+    if (v.z > 1) continue;               // behind the camera
+    const sx = ((v.x + 1) / 2) * rect.width, sy = ((1 - v.y) / 2) * rect.height;
+    const d = (sx - px) * (sx - px) + (sy - py) * (sy - py);
+    if (d < bestD) { bestD = d; best = h; }
+  }
+  if (!best) return null;
+  // The overlay knows the mark by NAME; the app works in ids. Names are unique
+  // by construction (A, B, ... Z, AA) and are what the button carries too.
+  const sec = state.sections.list.find((x) => x.name === best.name);
+  return sec ? { sec, head: best } : null;
+}
+
 view.onPointerDown = (e) => {
+  // ⚠️ A SECTION HEAD CLAIMS THE CLICK, exactly as a photo pin does above — and
+  // for the same reason: the user is aiming at a mark they can see, and it has
+  // just lit up under the pointer to say so.
+  //
+  // ⚠️ CTRL IS A SYNONYM, NOT THE GESTURE (2026-08-28, Marc: "you can select an
+  // arrow with ctrl+leftmousebutton in the perspective and then the cutoff from
+  // that section is activated ... or what do you think?"). Bare left click is
+  // the gesture, because the hover highlight has already announced the mark as
+  // a control and a control that announces itself but then needs a hidden
+  // modifier tells half a story. Ctrl stays bound so the gesture still works
+  // when a drawing tool would otherwise want the click — which is the one case
+  // where the bare click genuinely is ambiguous.
+  if (e.button === 0 && !e.altKey && !e.shiftKey) {
+    const hit = sectionHeadAt(e);
+    if (hit) { lookAlongSection(hit.sec.id); return true; }
+  }
   // ⚠️ A PIN CLAIMS THE CLICK BEFORE ANY TOOL SEES IT (2026-08-11), which is
   // why this returns true: without it, clicking a photograph would also lay
   // down a scoop or a plan vertex, and one gesture would mean two things. It
@@ -2571,9 +2730,29 @@ let planGesture = false;
 
 /** @param {PointerEvent} e */
 function planPointerDown(e) {
-  // Anything but a plain left click belongs to the camera — which, locked, can
-  // still pan and zoom. Same "not left" test as the brush, for the same reason.
-  if (e.button !== 0 || e.altKey || e.shiftKey || e.ctrlKey || e.metaKey) return false;
+  /**
+   * ⚠️⚠️ SHIFT BELONGS TO THE SECTION TOOL WHILE THE SECTION TOOL IS ACTIVE
+   * (2026-09-02, Marc: "if i hold down shift the ortho is on — but if i then
+   * click on the second point it does not draw any point before i release
+   * shift, and then it is also not orthogonal").
+   *
+   * ⚠️ THE BUG WAS HERE, NOT IN THE CONSTRAINT. The orthogonal preview was
+   * correct all along; the CLICK never arrived. This guard rejected every
+   * modified press so the locked plan camera could still pan, which handed
+   * shift+left to the camera and left the second point unplaced. Releasing
+   * shift then placed it unconstrained — the constraint reads `shift` at the
+   * moment of release, and by then it was false. One rejected event, and both
+   * halves of what Marc saw.
+   *
+   * ⚠️ NARROW ON PURPOSE. Only the section tool has given shift a meaning, so
+   * only the section tool takes it; every other plan tool keeps shift for the
+   * camera. The cost is that shift+drag no longer pans while cutting a
+   * section, which is the right trade — a modifier the active tool defines
+   * outranks a camera convenience.
+   */
+  const shiftIsOurs = e.shiftKey && state.plan.tool === "section";
+  if (e.button !== 0 || e.altKey || e.ctrlKey || e.metaKey
+      || (e.shiftKey && !shiftIsOurs)) return false;
   if (!state.dem || !state.surface) return false;
   const hit = pickWorld(e);
   if (!hit) return false;
@@ -2584,7 +2763,9 @@ function planPointerDown(e) {
   try { /** @type {HTMLCanvasElement} */ (view.canvas).setPointerCapture(e.pointerId); }
   catch { /* synthetic pointer */ }
   planGesture = true;
-  state.plan.drag = { x0: e.clientX, y0: e.clientY, moved: 0, vertex: null, at: hit };
+  state.plan.drag = {
+    x0: e.clientX, y0: e.clientY, moved: 0, vertex: null, point: null, at: hit,
+  };
 
   // In Select mode a press on a vertex begins dragging it. Grabbing is decided
   // on the DOWN and the move is applied live, so the vertex follows the hand
@@ -2595,6 +2776,14 @@ function planPointerDown(e) {
       state.plan.drag.vertex = v;
       if (v.region !== state.plan.selected) selectRegion(v.region);
     }
+  }
+  // ⚠️ THE SAME GRAMMAR AS A REGION VERTEX, deliberately: pressing ON a point
+  // grabs it, pressing anywhere else places a new one. Decided here on the DOWN
+  // so the point follows the hand instead of jumping when it is let go — and so
+  // that grabbing one can never also place one.
+  if (state.plan.tool === "points") {
+    const i = pickAttractPoint(hit.x, hit.y, planTolerance());
+    if (i >= 0) state.plan.drag.point = i;
   }
   return true;
 }
@@ -2615,6 +2804,18 @@ function planPointerMove(e) {
       // the expensive one — the readouts are refreshed on pointer-up instead.
       planInvalidate();
       p.overlay?.setRegions(p.set.regions, region.id);
+    }
+    if (p.drag.point != null && hit) {
+      // ⚠️ X AND Y ONLY — THE HEIGHT DOES NOT FOLLOW THE HAND. A point is a
+      // point in space; dragging it across the plan moves it over the ground,
+      // not onto it. Re-reading the ground here would make the target chase the
+      // landform under the cursor, which is precisely the runaway attract.js
+      // records for the elevation it used to re-read every call.
+      const pt = attractPoints.pts[p.drag.point];
+      if (pt) {
+        pt[0] = hit.x; pt[1] = hit.y;
+        p.overlay?.setPoints(attractPoints.pts);
+      }
     }
     return;
   }
@@ -2641,14 +2842,31 @@ function planPointerUp(e) {
     refreshPlan();
     return;
   }
+  if (drag.point != null) {
+    // ⚠️ PRICED HERE, NOT PER FRAME, for the reason the vertex drag gives above:
+    // a dry run on every pointer move would price the same edit dozens of times
+    // a second. Returning also stops a grab from falling through and placing a
+    // second point on top of the one just moved.
+    refreshAttract();
+    return;
+  }
   // A press that travelled is a pan the camera already handled, not a click.
   if (drag.moved >= 5) return;
 
   const hit = pickWorld(e) ?? drag.at;
   if (!hit) return;
   if (p.tool === "edit") { selectRegion(pickRegion(p.set.regions, hit.x, hit.y)); return; }
-  if (p.tool === "section") { sectionPlacepoint(hit.x, hit.y); return; }
+  if (p.tool === "section") {
+    // ⚠️ FROM THE EVENT, NOT FROM STORED STATE. `p.shift` is maintained by the
+    // move handler and the key handlers, neither of which fires if the hand is
+    // still between a keydown and a click — and the placement is the one moment
+    // the answer has to be exactly right.
+    p.shift = e.shiftKey;
+    sectionPlacepoint(hit.x, hit.y);
+    return;
+  }
   if (p.tool === "guide") { guidePlaceVertex(hit.x, hit.y); return; }
+  if (p.tool === "points") { attractPlacePoint(hit.x, hit.y); return; }
   planPlaceVertex(hit.x, hit.y);
 }
 
@@ -2775,7 +2993,25 @@ function setPlanMode(on) {
     p.camFree = false;
     view.setOrbitLocked(false);
     if (p.camReturn) {
-      view.setOrthographic(p.camReturn.orthographic);
+      /**
+       * ⚠️ THE SECTION TOOL COMES BACK IN PERSPECTIVE (2026-09-02, Marc: "when
+       * i leave the section tool i am in the orthogonal view — could that be
+       * the perspective view instead, but the section cut still visible").
+       *
+       * The stored projection is restored for every OTHER tool, and that is
+       * deliberate rather than an oversight: dipping into plan mode from a Top
+       * or Front axis view and coming back to a different projection than you
+       * left would be the tool losing your place. The section tool is the
+       * exception because what it makes is a cut through a solid, and a cut is
+       * something you go and look AT — the same reasoning by which pressing
+       * perspective has always been allowed to release the plan.
+       *
+       * ⚠️ THE CLIP IS NOT TOUCHED HERE, and must not be. Leaving the drawing
+       * mode is not leaving the section view; those are two different questions
+       * and the section's own button answers the second one.
+       */
+      const wasSection = p.tool === "section";
+      view.setOrthographic(wasSection ? false : p.camReturn.orthographic);
       view.setCameraState(p.camReturn.state, 0.45);
       p.camReturn = null;
     }
@@ -3196,6 +3432,7 @@ $("strength").addEventListener("input", () => {
 $("ex").addEventListener("input", () => {
   const v = currentExaggeration();
   $("ex-val").textContent = `${v.toFixed(1)}×`;
+  syncExaggerationNote();
   if (!state.surface) return;
   state.surface.setExaggeration(v);
   // The scatter is stretched with the ground, so the relationship between what
@@ -3329,6 +3566,11 @@ async function setContext(on) {
     state.dive?.setVisible(false);
     btn.classList.remove("on");
     note.textContent = "";
+    // ⚠️ THE READING GOES WITH THE GROUND IT IS OF. Left behind, the catchment
+    // wash and its arrows would hang over a patch with no context under them,
+    // describing a tile that is no longer drawn.
+    setInflow(false);
+    $("t-inflow").hidden = true;
     return;
   }
   if (!state.dem) return;
@@ -3347,8 +3589,81 @@ async function setContext(on) {
     }
   }
   state.dive.setVisible(true);
+  $("t-inflow").hidden = false;
   describeNest(nestCells(state.dive.dem, state.dem));
 }
+
+/**
+ * THE CONTEXT AS AN INPUT (2026-09-02, Marc: "could the context be activated to
+ * also create an input?").
+ *
+ * ⚠️ THIS IS THE FIRST THING IN THE TOOL THAT READS THE CONTEXT rather than
+ * drawing it. Everything else treats it as a backdrop; this asks it a question
+ * the patch cannot answer about itself — how much ground beyond the boundary
+ * drains across it, and where.
+ *
+ * ⚠️ IT ANSWERS ON THE CONTEXT'S OWN GRID and says so in the readout. The
+ * figure is a 4 m answer about 0.25 m ground, which is finding 1 arriving on
+ * the input side, and stating the grid is what keeps it from being read as a
+ * precision it does not have.
+ *
+ * ⚠️ AND IT NEVER PREDICTS. No rainfall, no infiltration, no roughness, no
+ * pipe. It is the shape of the ground beyond the patch, and the wording here
+ * has to stay that side of the line.
+ * @param {boolean} on
+ */
+function setInflow(on) {
+  const btn = /** @type {HTMLButtonElement} */ ($("t-inflow"));
+  const note = $("inflow-note");
+  if (state.inflow.overlay) {
+    view.scene.remove(state.inflow.overlay.group);
+    state.inflow.overlay.dispose();
+    state.inflow.overlay = null;
+  }
+  if (!on || !state.dive || !state.dem) {
+    btn.classList.remove("on");
+    note.hidden = true;
+    return;
+  }
+  const rect = DEM.nestHole(state.dive.dem, state.dem);
+  if (!rect) {
+    note.hidden = false;
+    note.textContent = "the patch does not nest in this context, so what crosses "
+      + "its boundary cannot be placed — nothing measured.";
+    btn.classList.remove("on");
+    return;
+  }
+  const f = externalInflow(state.dive.dem, rect);
+  state.inflow.last = f;
+  state.inflow.overlay = new InflowOverlay(state.dive.dem, f, {
+    verticalExaggeration: currentExaggeration(),
+  });
+  view.scene.add(state.inflow.overlay.group);
+  btn.classList.add("on");
+
+  const ha = (m2) => (m2 >= 10000 ? `${(m2 / 10000).toFixed(2)} ha` : `${Math.round(m2)} m²`);
+  const bySide = {};
+  for (const c of f.crossings) bySide[c.side] = (bySide[c.side] || 0) + 1;
+  const sides = Object.entries(bySide).sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${v} ${k}`).join(" · ");
+  note.hidden = false;
+  note.innerHTML =
+    `<b>${ha(f.externalM2)}</b> of ground outside the patch drains into it — `
+    + `<b>${f.ratio.toFixed(1)}×</b> its own ${ha(f.patchM2)}. `
+    + `It crosses at ${f.crossings.length} cell${f.crossings.length === 1 ? "" : "s"}`
+    + (sides ? ` (${sides})` : "") + `. `
+    + `Measured on the ${f.cell} m context grid, ${(state.dem.cell)} m ground beneath it. `
+    + (f.truncated
+      ? `⚠️ the catchment reaches the edge of the context tile, so this is a `
+        + `LOWER BOUND — ground beyond the tile is not in the data.`
+      : `The catchment closes inside the context tile.`)
+    + ` Steepest-descent paths over the bare surface: no rainfall, infiltration, `
+    + `roughness or pipework is in this figure.`;
+}
+
+$("t-inflow").addEventListener("click", () => {
+  setInflow(!$("t-inflow").classList.contains("on"));
+});
 
 /**
  * State the relation between the two tiles, as MEASURED rather than remembered.
@@ -3478,6 +3793,11 @@ for (const b of document.querySelectorAll("button.rep")) {
     // Switching between blocks and the smooth surface changes what the water is
     // standing on, in both directions — see the block slider's handler.
     if (state.water.on) refreshWater();
+    // ⚠️ THE SECTIONS ARE REDRAWN, because what the ground IS has just changed.
+    // The cut line steps over blocks and curves over the smooth surface, and
+    // nothing else on this path would have rebuilt it — the section would have
+    // kept the shape of the representation it was drawn under.
+    refreshSections();
     syncSolidNote();
   });
 }
@@ -3849,6 +4169,14 @@ for (const b of document.querySelectorAll("button.ptool")) {
     // sub-section defaults closed since the menu-length fix. The same rising-edge
     // rule the sidebar already applies to Shape applies here: the mode starting
     // is what opens the section, and closing it afterwards is respected.
+    // ⚠️ THE POINT TOOL OPENS THE ATTRACTOR, for the reason the note below gives:
+    // a tool whose controls are folded out of sight looks like a tool that does
+    // nothing, and placed points mean nothing without the slider beside them.
+    if (tool === "points") {
+      $("sec-shape").open = true;
+      const a = $("sec-attract");
+      if (a) /** @type {HTMLDetailsElement} */ (a).open = true;
+    }
     if (tool === "guide") {
       $("sec-shape").open = true;
       // ⚠️ OPEN IT, DO NOT SCROLL TO IT. The first version called
@@ -3864,6 +4192,7 @@ for (const b of document.querySelectorAll("button.ptool")) {
       : tool === "hole" ? "draw a hole inside the selected region"
       : tool === "section" ? "click two points to cut a section"
       : tool === "guide" ? "click two or more points along the ground to trace a centreline"
+      : tool === "points" ? "click to place points — the ground is pulled toward the nearest one"
       : "select a region, or drag its vertices");
   });
 }
@@ -4248,7 +4577,7 @@ function setRuleHighlight(mask) {
   if (state.dem) {
     if (!selOverlay) {
       selOverlay = new SelectionOverlay(state.dem,
-        { verticalExaggeration: currentExaggeration() });
+        { verticalExaggeration: currentExaggeration(), darken: SEL_DARKEN });
       view.scene.add(selOverlay.group);
     }
     selOverlay.setExaggeration(currentExaggeration());
@@ -4266,39 +4595,31 @@ function setRuleHighlight(mask) {
  * @param {Uint8ClampedArray|null} buf
  */
 function withSelection(buf) {
-  if (!ruleShown || !state.dem) return buf;
-  const n = state.dem.nrows * state.dem.ncols;
-  const out = new Uint8ClampedArray(n * 4);
-  for (let i = 0; i < n; i++) {
-    const o = i * 4;
-    const inSel = !!ruleShown[i];
-    if (buf) {
-      out[o] = buf[o]; out[o + 1] = buf[o + 1]; out[o + 2] = buf[o + 2]; out[o + 3] = buf[o + 3];
-    } else {
-      out[o] = 232; out[o + 1] = 229; out[o + 2] = 222; out[o + 3] = 255;
-    }
-    // ⚠️ THE SELECTION IS DARKENED IN PLACE; THE REST IS LEFT ALONE (Marc,
-    // 2026-08-20). This reverses the 2026-08-11 decision to mark the UNSELECTED
-    // instead, and the reason that decision was taken still stands — "tinting
-    // the selection paints over the very cells being judged". A MULTIPLY is not
-    // a tint: it scales each channel by the same factor, so hue and the
-    // relative order of values inside the selection survive, and the cells
-    // being judged still show their own colour. What the old version cost was
-    // the REST of the tile: pushing 60 % of the ground toward paper meant the
-    // layer could no longer be read anywhere outside the selection, which is
-    // where the comparison lives.
-    //
-    // ⚠️ A MULTIPLY, NOT A SUBTRACTION. Taking a fixed amount off each channel
-    // would crush the dark end of a ramp to black and flatten exactly the
-    // distinctions the darkest cells are carrying; scaling preserves the ratios
-    // all the way down.
-    if (inSel) {
-      out[o] *= SEL_DARKEN;
-      out[o + 1] *= SEL_DARKEN;
-      out[o + 2] *= SEL_DARKEN;
-    }
-  }
-  return out;
+  /**
+   * ⚠️⚠️ THE SELECTION IS NO LONGER MIXED IN HERE (2026-09-27, Marc: "the shaded
+   * selected faces has at the edge some blur in the shader, where it should fit
+   * the curve that is displayed as the border of the selection").
+   *
+   * This used to multiply every selected cell by SEL_DARKEN. The surface is
+   * drawn with `vertexColors: true` and carries ONE VERTEX PER CELL CENTRE, so
+   * the GPU interpolated the mask's hard edge across a whole cell — while the
+   * boundary line sits on the cell LATTICE, half a cell away, running down the
+   * middle of that gradient. The two could never line up, and no amount of
+   * tuning here would have fixed it: a per-vertex colour has no way to change
+   * value at a cell boundary.
+   *
+   * SelectionOverlay now fills the selection as quads built from the SAME
+   * corners it traces the boundary from, so the fill and the outline are one
+   * piece of geometry. It also stops re-shading 65 536 vertices every time the
+   * selection changes.
+   *
+   * Kept as a named pass-through rather than deleted at its four call sites:
+   * the layer buffer is what the surface shows, and one obvious place to put a
+   * per-cell effect back is worth more than four edits saved.
+   *
+   * @param {Uint8ClampedArray|null} buf
+   */
+  return buf;
 }
 
 /**
@@ -5322,6 +5643,7 @@ function refreshGuide() {
     ? PROFILES[o.profile].halfWidth(o) : 0;
   state.plan.overlay?.setGuide(guide.pts, null, half);
   refreshGuidePreview();
+  refreshAttract();
 }
 
 /**
@@ -5449,6 +5771,203 @@ for (const id of ["guide-profile", "guide-along"]) {
   $(id).addEventListener("change", refreshGuide);
 }
 $("guide-apply").addEventListener("click", applyGuideNow);
+
+/* ---------------------------------------------------------------- attractor */
+/**
+ * Attractors and repellers — vector geometry that pulls the ground to itself.
+ *
+ * ⚠️ IT DRAWS NOTHING OF ITS OWN. The Curve tool and the region tools already
+ * make the two geometries this accepts, and giving the attractor a third way to
+ * draw the same shapes would be a second vocabulary for one idea. What it adds
+ * is the slider.
+ */
+/**
+ * The placed points.
+ *
+ * ⚠️ NOT IN THE PLAN SET, and that is deliberate for now. PlanSet is a set of
+ * RINGS carrying fields a shapefile round-trips; a point has none of them, and
+ * adding a second geometry kind to it would touch the region list, the mask
+ * builder, the exporter and the shapefile writer at once. Held beside the
+ * guide's own `pts` instead — the same call guide.js already records: ship the
+ * primitive, promote it to an object when it earns it.
+ */
+const attractPoints = { pts: [] };
+
+/** @param {number} x @param {number} y */
+function attractPlacePoint(x, y) {
+  // ⚠️ THE HEIGHT IS TAKEN NOW, ONCE. pickWorld returns X and Y only — Z on the
+  // mesh is exaggerated — so the elevation comes from the DEM at this moment and
+  // stays with the point. See the note in attract.js for what re-reading it
+  // every call did to the arithmetic.
+  const z = state.dem ? groundAt(state.dem, x, y) : NaN;
+  attractPoints.pts.push(Number.isFinite(z) ? [x, y, z] : [x, y]);
+  // Placing a point is pointless while the attractor is reading something else.
+  /** @type {HTMLSelectElement} */ ($("attract-source")).value = "point";
+  refreshAttract();
+  status(`${attractPoints.pts.length} point${attractPoints.pts.length > 1 ? "s" : ""} placed`
+    + " · the nearest one governs each cell", 1600);
+}
+
+/**
+ * The placed point nearest (x, y) within `tol`, or −1.
+ * @param {number} x @param {number} y @param {number} tol ground units
+ */
+function pickAttractPoint(x, y, tol) {
+  let best = -1, bd = tol;
+  for (let i = 0; i < attractPoints.pts.length; i++) {
+    const d = Math.hypot(x - attractPoints.pts[i][0], y - attractPoints.pts[i][1]);
+    if (d <= bd) { bd = d; best = i; }
+  }
+  return best;
+}
+
+function attractGeom() {
+  const want = /** @type {HTMLSelectElement} */ ($("attract-source")).value;
+  if (want === "point") {
+    return attractPoints.pts.length ? { kind: "point", pts: attractPoints.pts } : null;
+  }
+  if (want === "polygon") {
+    const ext = planExtent();
+    if (!state.plan.selected || !ext || !ext.count) return null;
+    // The region's OWN mask, holes included — see the note in attract.js.
+    return { kind: "polygon", mask: ext.mask, rect: ext, pts: [] };
+  }
+  return guide.pts.length >= 2 ? { kind: "line", pts: guide.pts } : null;
+}
+
+function attractOpts() {
+  return {
+    strength: Number(/** @type {HTMLInputElement} */ ($("attract-strength")).value),
+    radius: Number(/** @type {HTMLInputElement} */ ($("attract-radius")).value),
+    falloff: /** @type {HTMLSelectElement} */ ($("attract-falloff")).value,
+    along: /** @type {HTMLSelectElement} */ ($("attract-along")).value,
+    gradient: Number(/** @type {HTMLInputElement} */ ($("attract-grad")).value) / 100,
+    offset: Number(/** @type {HTMLInputElement} */ ($("attract-offset")).value),
+  };
+}
+
+function refreshAttract() {
+  if (!$("attract-tools")) return;
+  const o = attractOpts();
+  const geom = attractGeom();
+  // ⚠️ ONLY A CURVE HAS A LENGTH TO RUN ALONG. A point and a polygon each hold
+  // one elevation, so "level / grade / follow" and the gradient are a curve's
+  // controls — hidden for the others rather than left to be set and silently
+  // ignored.
+  const isLine = geom ? geom.kind === "line"
+    : /** @type {HTMLSelectElement} */ ($("attract-source")).value === "line";
+  $("attract-t-val").textContent = (o.strength >= 0 ? "+" : "−") + Math.abs(o.strength).toFixed(2);
+  $("attract-r-val").textContent = `${o.radius.toFixed(1)} m`;
+  $("attract-o-val").textContent = `${o.offset >= 0 ? "+" : "−"}${Math.abs(o.offset).toFixed(2)} m`;
+  $("attract-g-val").textContent = `${(o.gradient * 100).toFixed(1)}%`;
+  // A polygon holds ONE elevation, so the longitudinal controls are a curve's.
+  $("attract-along-field").hidden = !isLine;
+  $("attract-grad-field").hidden = !isLine || o.along !== "grade";
+  $("attract-along-note").textContent = isLine ? (ALONG[o.along]?.note ?? "") : "";
+  $("attract-tools").hidden = !state.dem;
+  $("attract-empty").hidden = !!state.dem && !!geom;
+  state.plan.overlay?.setPoints(attractPoints.pts);
+  refreshAttractPreview(geom, o);
+}
+
+/**
+ * What the attractor would cost, before anything moves — priced through the
+ * same function that will do it, dry, like every other modifier here.
+ */
+function refreshAttractPreview(geom, o) {
+  const el = $("attract-preview");
+  if (!el) return;
+  if (!state.dem || !geom) { el.innerHTML = ""; return; }
+  if (!o.strength) {
+    el.innerHTML = "<b>Pull</b> is at zero, so nothing moves. Take it toward "
+      + "<b>+1</b> to bring the ground onto the geometry, or <b>−1</b> to push it away.";
+    return;
+  }
+  const r = attract(state.dem, geom, { ...o, dryRun: true });
+  if (!r.cells) {
+    el.innerHTML = "Nothing within reach moves — the ground already matches the "
+      + "geometry here, or the reach is too short to touch it.";
+    return;
+  }
+  const m3 = (v) => `${v.toFixed(v < 10 ? 2 : 1)} m³`;
+  const dir = o.strength > 0 ? "toward" : "away from";
+  const what = geom.kind === "line" ? "the curve"
+    : geom.kind === "point" ? "the points" : "the shape";
+  el.innerHTML =
+    `Pulling <b>${r.cells.toLocaleString("en")}</b> cells ${dir} ${what} at `
+    + `<b>${o.strength >= 0 ? "+" : "−"}${Math.abs(o.strength).toFixed(2)}</b>, `
+    + `fading over <b>${o.radius.toFixed(1)} m</b>: `
+    + `<b>${m3(r.cut)}</b> cut and <b>${m3(r.fill)}</b> fill, net `
+    + `<b>${r.net >= 0 ? "+" : "−"}${Math.abs(r.net).toFixed(1)} m³</b> `
+    + `${r.net > 0 ? "imported onto site" : r.net < 0 ? "taken off site" : "moved"}.`
+    + (Math.abs(o.strength) === 1
+      ? ` At full pull the ground lands exactly on `
+        + `${geom.kind === "point" ? "the nearest point" : what}.`
+      : "");
+}
+
+function applyAttractNow() {
+  const geom = attractGeom();
+  if (!state.dem || !state.surface || !geom) {
+    status("trace a curve, or select a shape, for the attractor to work on", 3000);
+    return;
+  }
+  const o = attractOpts();
+  if (!o.strength) { status("pull is at zero — nothing to apply", 2500); return; }
+  beginEdit();
+  const res = attract(state.dem, geom, { ...o, ledger: state.ledger });
+  if (!res.cells) {
+    abandonEdit();
+    status("the attractor moves nothing here", 3000);
+    return;
+  }
+  commitEdit(`ground pulled ${o.strength > 0 ? "toward" : "away from"} `
+    + `${geom.kind === "line" ? "a curve" : geom.kind === "point" ? "points" : "a shape"}`, res);
+  state.surface.updateRect(res.r0, res.c0, res.r1, res.c1);
+  state.analysis?.invalidate(res);
+  refreshSurfaceOverlays(true);
+  if (state.water.on) refreshWater();
+  updateLedger();
+  state.analysis?.settle();
+  planInvalidate();
+  refreshAttract();
+  status(`attractor · ${res.cells.toLocaleString("en")} cells · net `
+    + `${res.net >= 0 ? "+" : "−"}${Math.abs(res.net).toFixed(1)} m³`, 4500);
+}
+
+// ⚠️ THE VOCABULARIES COME FROM THE KERNEL, so the interface cannot offer a
+// falloff or a longitudinal mode that attract.js does not implement — the same
+// rule the guide's two selects follow.
+for (const [k, v] of Object.entries(FALLOFF)) {
+  /** @type {HTMLSelectElement} */ ($("attract-falloff")).add(new Option(v.label, k));
+}
+for (const [k, v] of Object.entries(ALONG)) {
+  /** @type {HTMLSelectElement} */ ($("attract-along")).add(new Option(v.label, k));
+}
+// ⚠️ LEVEL, NOT FOLLOW. A curve that follows the ground sits ON it, so pulling
+// the ground toward it moves nothing — the tool would look broken on first use.
+/** @type {HTMLSelectElement} */ ($("attract-along")).value = "level";
+for (const [k, label] of [["point", "The placed points"],
+  ["line", "The traced curve"], ["polygon", "The selected shape"]]) {
+  /** @type {HTMLSelectElement} */ ($("attract-source")).add(new Option(label, k));
+}
+for (const id of ["attract-strength", "attract-radius", "attract-grad", "attract-offset"]) {
+  $(id).addEventListener("input", refreshAttract);
+}
+for (const id of ["attract-source", "attract-falloff", "attract-along"]) {
+  $(id).addEventListener("change", refreshAttract);
+}
+$("attract-apply").addEventListener("click", applyAttractNow);
+$("attract-points-clear").addEventListener("click", () => {
+  // ⚠️ Clearing the POINTS does not undo the earth they moved — the same rule
+  // the guide's "clear the line" follows. The ledger records what was done to
+  // the ground, and the ground is still moved.
+  attractPoints.pts = [];
+  refreshAttract();
+  status("points cleared — the ground they moved is unchanged", 2500);
+});
+refreshAttract();
+
 $("guide-clear").addEventListener("click", () => {
   // ⚠️ Clearing the LINE does not undo the earth it moved — the same rule
   // deleting a region follows. The ledger records what was done to the ground,
@@ -6885,6 +7404,36 @@ function sectionPlanBand(sec, half = 10) {
 }
 
 /** Everything on screen that describes the sections. One entry point. */
+/**
+ * The drawn height of the voxel column under a world point, or null when the
+ * ground is not being drawn as blocks.
+ *
+ * ⚠️ FROM `blockLevels`, WHICH IS THE EXPORTER'S QUANTISER AND CARRIES ITS OWN
+ * WARNING THAT IT MUST AGREE WITH voxels.js. Reading the block level is what
+ * makes the section step at the block EDGES; quantising each sampled height
+ * independently would step wherever the terrain crossed a level instead, and the
+ * line would cut through the cubes it is drawn over.
+ *
+ * ⚠️ GROUND UNITS, NOT EXAGGERATED. The overlay's group carries the z scale, as
+ * voxels.js's does; multiplying here would apply it twice.
+ */
+function voxelStepZ() {
+  if (state.representation !== "voxel" || !state.dem || !state.surface) return null;
+  const vf = /** @type {any} */ (state.surface);
+  const k = vf.blockCells, baseZ = vf.baseZ, q = vf.voxelHeight;
+  if (!(k > 0) || !(q > 0) || !Number.isFinite(baseZ)) return null;
+  const dem = state.dem;
+  const { levels, bCols } = blockLevels(dem, k, baseZ, q);
+  const northY = dem.originY + dem.nrows * dem.cell;
+  return (x, y) => {
+    const c = Math.floor((x - dem.originX) / dem.cell);
+    const r = Math.floor((northY - y) / dem.cell);
+    if (r < 0 || c < 0 || r >= dem.nrows || c >= dem.ncols) return NaN;
+    const lv = levels[Math.floor(r / k) * bCols + Math.floor(c / k)];
+    return lv < 0 ? NaN : baseZ + lv * q;
+  };
+}
+
 function refreshSections() {
   const any = state.sections.list.length > 0;
   $("section-tools").hidden = !any;
@@ -6905,11 +7454,13 @@ function refreshSections() {
   const cut = sectionProfiles();
   const ov = state.sections.overlay;
   ov.setExaggeration(currentExaggeration());
-  ov.setSections(cut, { folded: state.sections.folded });
+  ov.setSections(cut, { folded: state.sections.folded, stepZ: voxelStepZ() });
   $("t-fold-sections").classList.toggle("on", state.sections.folded);
   // ⚠️ Sections outlive plan mode, exactly as regions do. Only CUTTING one needs
   // the locked view; looking at what it reveals is better done from an angle.
-  ov.setVisible(any);
+  // ⚠️ OR A PLACEMENT IS PENDING — see refreshSectionPending. A settle that ran
+  // mid-placement would otherwise hide the anchor the user is aiming from.
+  ov.setVisible(any || !!state.sections.pending);
 
   const ul = /** @type {HTMLElement} */ ($("section-list"));
   ul.innerHTML = "";
@@ -6954,15 +7505,63 @@ function renameSections() {
 }
 
 /** @param {number} x @param {number} y */
+/**
+ * Constrain a section's far end to an orthogonal run from its anchor
+ * (2026-08-28, Marc: "if you hold down shift you can draw an orthogonal line").
+ *
+ * ⚠ AXIS-ALIGNED IN WORLD SPACE, not screen space. The tile is georeferenced
+ * and a section is a real bearing, so "orthogonal" has to mean due N/S or E/W
+ * on the ground — a screen-space constraint would give a different section for
+ * the same drag depending on where the camera happened to be pointing.
+ * @param {number[]} a anchor, world XY
+ * @param {number} x @param {number} y  cursor, world XY
+ */
+function sectionConstrain(a, x, y) {
+  const dx = x - a[0], dy = y - a[1];
+  // The longer run wins, so the line follows the direction the hand is already
+  // travelling rather than snapping to whichever axis was tested first.
+  return Math.abs(dx) >= Math.abs(dy) ? [x, a[1]] : [a[0], y];
+}
+
+/** Redraw the placement preview. Cheap by construction — see setPending. */
+function refreshSectionPending() {
+  const ov = state.sections.overlay;
+  if (!ov) return;
+  const p = state.sections;
+  /**
+   * ⚠️⚠️ THE OVERLAY IS HIDDEN UNTIL A SECTION EXISTS, AND THE PREVIEW LIVES
+   * INSIDE IT (2026-09-02, Marc: "when i activate the section tool and make the
+   * first click it does not draw any arrow — it draws both after the second
+   * click"). `refreshSections` sets visibility from `list.length > 0`, so
+   * before the FIRST section is cut the whole group is invisible: the anchor's
+   * head was being drawn correctly, into a hidden group, and only appeared when
+   * the second click made the list non-empty and revealed both at once.
+   *
+   * The pending placement is reason enough to be visible — it is the only
+   * drawing there is at that moment.
+   */
+  ov.setVisible(p.list.length > 0 || !!p.pending);
+  ov.setPending(p.pending || null, p.pending ? (p.hover || null) : null,
+    sectionName(p.list.length));
+}
+
 function sectionPlacepoint(x, y) {
   const p = state.sections;
+  // The overlay is built by refreshSections, which has no reason to have run if
+  // no section has ever been cut on this tile — and the anchor needs it now.
+  if (!p.overlay) refreshSections();
   if (!p.pending) {
     p.pending = [x, y];
-    status("section: click the far end");
+    p.hover = null;
+    refreshSectionPending();
+    status("section: click the far end · shift for orthogonal · backspace to undo the anchor");
     return;
   }
   const a = p.pending;
+  if (p.shift) [x, y] = sectionConstrain(a, x, y);
   p.pending = null;
+  p.hover = null;
+  refreshSectionPending();
   if (Math.hypot(x - a[0], y - a[1]) < (state.dem ? state.dem.cell * 2 : 1)) {
     status("section too short — click two points apart");
     return;
@@ -6973,6 +7572,105 @@ function sectionPlacepoint(x, y) {
   const s = p.list[p.list.length - 1];
   status(`section ${s.name}–${s.name} cut`, 2600);
 }
+
+/**
+ * THE PLACEMENT INTERACTION (2026-08-28, Marc). Three things the section tool
+ * did not do: show the anchor, follow the cursor, and take a modifier.
+ *
+ * ⚠ THE MOVE HANDLER IS SEPARATE FROM THE HUD'S. That one returns early
+ * whenever `e.buttons` is set or the HUD is off, which is right for a hover
+ * popover and wrong for this — a rubber band has to keep following the cursor
+ * while a button is down. Two handlers on the same element, each with its own
+ * business.
+ *
+ * ⚠ IT ONLY PICKS WHILE A SECTION IS PENDING. pickWorld raycasts the surface,
+ * and running that on every pointer move regardless of tool would be a cost
+ * paid by everyone for a feature almost nobody is using at that moment.
+ */
+$("viewport").addEventListener("pointermove", (e) => {
+  const p = state.sections;
+  if (!p.pending || state.plan.tool !== "section") return;
+  p.shift = e.shiftKey;
+  const hit = pickWorld(e);
+  if (!hit) return;
+  p.hover = p.shift ? sectionConstrain(p.pending, hit.x, hit.y) : [hit.x, hit.y];
+  refreshSectionPending();
+});
+
+/**
+ * Light the section head under the pointer, and say so with the cursor.
+ *
+ * ⚠️ THIS IS THE WHOLE AFFORDANCE (2026-08-28, Marc: "when you hover over one
+ * of the sections where the text is now gray, then the letter should highlight
+ * in black indicating that i can click on it"). The mark was already drawn and
+ * already clickable; what it had no way of saying was that it was clickable.
+ *
+ * ⚠️ IT IS A THIRD MOVE HANDLER ON THE SAME ELEMENT, and deliberately so — the
+ * HUD's bails out whenever a button is down, the placement preview's runs only
+ * while a section is pending, and this one has to run in every mode including
+ * mid-drag. Each keeps its own guard rather than one handler growing three.
+ *
+ * ⚠️ AND IT IS CHEAP: no raycast. The heads are a handful of points projected
+ * to the screen, which is arithmetic, not intersection — the reason
+ * `sectionHeadAt` was written screen-space in the first place.
+ */
+$("viewport").addEventListener("pointermove", (e) => {
+  const ov = state.sections.overlay;
+  if (!ov) return;
+  // Never while placing: the section tool owns the pointer then, and a head
+  // lighting up under a rubber band would invite a click that means something
+  // else entirely.
+  const hit = state.sections.pending ? null : sectionHeadAt(e);
+  // ⚠️ NOTHING IS SCHEDULED HERE. The view runs a continuous rAF loop, so the
+  // swapped material is on screen next frame; `setHot` returns whether it
+  // changed only so a future invalidating renderer has the hook. Written as
+  // `view.requestRender()` first, which does not exist.
+  ov.setHot(hit ? hit.head.name : null);
+  // ⚠️ ON THE CANVAS, NOT THE VIEWPORT. The viewport carries the readout and
+  // the palettes, and a pointer cursor set on it would be inherited by every
+  // control standing over the scene.
+  view.canvas.style.cursor = hit ? "pointer" : "";
+});
+
+/**
+ * Shift pressed or released with the pointer standing still still has to
+ * re-draw: the constraint changes the line without the cursor moving, and a
+ * preview that only updated on movement would lie until the hand twitched.
+ */
+for (const ev of ["keydown", "keyup"]) {
+  window.addEventListener(ev, (e) => {
+    const p = state.sections;
+    if (!p.pending || e.key !== "Shift") return;
+    p.shift = (ev === "keydown");
+    if (p.hover) {
+      // Re-derive from the raw cursor, not from the already-constrained point:
+      // constraining an orthogonal point again is a no-op, so releasing shift
+      // would otherwise never restore the free line.
+      p.hover = p.shift ? sectionConstrain(p.pending, p.hover[0], p.hover[1]) : p.hover;
+      refreshSectionPending();
+    }
+  });
+}
+
+/**
+ * Backspace steps back off the anchor (Marc: "if you hit back space then you
+ * can go back to the previous anchor point"). With a two-point section there is
+ * exactly one anchor to step off, so this cancels the pending cut and leaves
+ * the finished sections alone.
+ */
+window.addEventListener("keydown", (e) => {
+  if (e.key !== "Backspace") return;
+  const t = /** @type {HTMLElement} */ (e.target);
+  // Never steal the key from a field the user is typing in.
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+  const p = state.sections;
+  if (!p.pending) return;
+  e.preventDefault();
+  p.pending = null;
+  p.hover = null;
+  refreshSectionPending();
+  status("section anchor dropped — click to start again", 2200);
+});
 
 $("t-fold-sections").addEventListener("click", () => {
   state.sections.folded = !state.sections.folded;
@@ -7057,6 +7755,220 @@ $("drainage-export").addEventListener("click", () => {
   status("drainage plan exported · channels, divides, standing water, outfalls", 4000);
 });
 
+/**
+ * THE DRAINAGE AS DATA (2026-09-02, Marc: "the fall lines or the channels —
+ * could we also make these available for download, along with the watersheds,
+ * both as vector data, as .dxf and as .shp").
+ *
+ * ⚠️ TWO FORMATS BECAUSE THEY ANSWER DIFFERENT QUESTIONS, not for completeness.
+ * A shapefile carries the numbers — contributing area, length, class, cell
+ * count — and is what anyone doing analysis wants. A DXF carries none: the
+ * format has no attribute table, so the classes travel AS LAYERS, which is what
+ * CAD has always done and what anyone tracing over the network wants. GeoJSON
+ * goes in too because it is one line of code and it is the format that opens
+ * without a driver.
+ *
+ * ⚠️ THE CHANNELS ARE NOT THE SHEET'S CHANNELS, geometrically. drainageSVG
+ * draws one stub per cell, which is right for ink and useless as data; this
+ * traces connected reaches head-to-confluence. Same thresholds, same flow
+ * model, same network — different geometry, for a different purpose. See
+ * export/network.js.
+ */
+$("drainage-vector-export").addEventListener("click", () => {
+  if (!state.dem) { status("load a site first", 3000); return; }
+  status("tracing the network…", 1500);
+  // Deferred a frame so the status paints before the trace blocks the thread —
+  // on a 256x256 tile this is a second or two of accumulation and labelling.
+  setTimeout(() => { try { exportDrainageVector(); }
+    catch (err) { status(`drainage export failed: ${err && err.message}`, 6000); throw err; } }, 30);
+});
+
+function exportDrainageVector() {
+  const dem = /** @type {import("./dem.js").DEM} */ (state.dem);
+  const { reaches, minAreaM2 } = channelReaches(dem);
+  const { catchments, count, microCells } = catchmentPolygons(dem);
+  if (!reaches.length && !catchments.length) {
+    status("nothing to export — no channels and no catchments on this surface", 5000);
+    return;
+  }
+  const epsg = dem.epsg ?? null;
+  const enc = new TextEncoder();
+  const stem = exportStem("drainage-vector");
+  const files = [];
+
+  // ── channels ───────────────────────────────────────────────────────────────
+  const CH_FIELDS = [
+    { name: "class", type: "N", size: 3 },
+    { name: "class_name", type: "C", size: 12 },
+    { name: "area_m2", type: "N", size: 16, decimals: 2 },
+    { name: "length_m", type: "N", size: 12, decimals: 2 },
+    { name: "basin", type: "N", size: 12 },
+  ];
+  const chFeatures = reaches.map((r) => ({
+    rings: [r.pts],
+    attributes: {
+      class: r.cls,
+      class_name: (CHANNEL_CLASSES.find((c) => c.cls === r.cls) || {}).name || "",
+      area_m2: r.areaM2, length_m: r.lengthM, basin: r.basin,
+    },
+  }));
+  if (chFeatures.length) {
+    const w = writeShapefile(chFeatures, { fields: CH_FIELDS, epsg, type: "polyline" });
+    files.push({ name: `${stem}-channels.shp`, data: w.shp });
+    files.push({ name: `${stem}-channels.shx`, data: w.shx });
+    files.push({ name: `${stem}-channels.dbf`, data: w.dbf });
+    if (w.prj) files.push({ name: `${stem}-channels.prj`, data: enc.encode(w.prj) });
+    files.push({
+      name: `${stem}-channels.geojson`,
+      data: enc.encode(writeGeoJSON(chFeatures, {
+        crs: crsOf() === "CRS not declared" ? null : crsOf(), type: "LineString",
+      })),
+    });
+  }
+
+  // ── catchments ─────────────────────────────────────────────────────────────
+  const CA_FIELDS = [
+    { name: "basin", type: "N", size: 12 },
+    { name: "area_m2", type: "N", size: 16, decimals: 2 },
+    { name: "cells", type: "N", size: 10 },
+    { name: "micro", type: "C", size: 5 },
+  ];
+  const caFeatures = catchments.map((c) => ({
+    rings: c.rings,
+    attributes: {
+      basin: c.basin, area_m2: c.areaM2, cells: c.cells, micro: c.micro ? "true" : "false",
+    },
+  }));
+  if (caFeatures.length) {
+    const w = writeShapefile(caFeatures, { fields: CA_FIELDS, epsg });
+    files.push({ name: `${stem}-catchments.shp`, data: w.shp });
+    files.push({ name: `${stem}-catchments.shx`, data: w.shx });
+    files.push({ name: `${stem}-catchments.dbf`, data: w.dbf });
+    if (w.prj) files.push({ name: `${stem}-catchments.prj`, data: enc.encode(w.prj) });
+    files.push({
+      name: `${stem}-catchments.geojson`,
+      data: enc.encode(writeGeoJSON(caFeatures, {
+        crs: crsOf() === "CRS not declared" ? null : crsOf(),
+      })),
+    });
+  }
+
+  // ── one DXF, everything on its own layer ───────────────────────────────────
+  const layers = [];
+  for (const c of CHANNEL_CLASSES) {
+    const pl = reaches.filter((r) => r.cls === c.cls).map((r) => ({ pts: r.pts }));
+    if (pl.length) {
+      layers.push({
+        name: `CHANNEL-${c.name.toUpperCase()}`,
+        colour: c.cls === 3 ? ACI.blue : c.cls === 2 ? ACI.cyan : ACI.grey,
+        polylines: pl,
+      });
+    }
+  }
+  // ⚠️ MICRO CATCHMENTS GET THEIR OWN LAYER rather than being dropped or mixed
+  // in. On the 0.25 m patch they are most of the surface — a real measurement
+  // about ground that is a field of centimetre-deep hollows — and a CAD user
+  // wants to be able to switch them off without losing them.
+  const caLayer = (name, colour, list) => {
+    const pl = [];
+    for (const c of list) for (const ring of c.rings) pl.push({ pts: ring, closed: true });
+    if (pl.length) layers.push({ name, colour, polylines: pl });
+  };
+  caLayer("CATCHMENTS", ACI.green, catchments.filter((c) => !c.micro));
+  caLayer("CATCHMENTS-MICRO", ACI.grey, catchments.filter((c) => c.micro));
+  if (layers.length) {
+    files.push({ name: `${stem}.dxf`, data: enc.encode(writeDXF(layers)) });
+  }
+
+  files.push({
+    name: "README.txt",
+    data: enc.encode(drainageVectorReadme({
+      reaches, catchments, count, microCells, minAreaM2, epsg,
+    })),
+  });
+
+  download(new Blob([makeZip(files)], { type: "application/zip" }), `${stem}.zip`);
+  status(`${reaches.length} channel reach${reaches.length === 1 ? "" : "es"} and `
+    + `${catchments.length} catchment${catchments.length === 1 ? "" : "s"} exported · `
+    + `DXF + SHP + GeoJSON`, 6000);
+}
+
+function drainageVectorReadme(d) {
+  const L = [];
+  const m2 = (v) => (v >= 10000 ? `${(v / 10000).toFixed(2)} ha` : `${v.toFixed(1)} m²`);
+  L.push("DL-TerrainDiversity — DRAINAGE NETWORK AS VECTOR DATA");
+  L.push("=".repeat(64));
+  L.push("");
+  L.push(`Terrain:  ${state.dem?.name ?? "—"}`);
+  L.push(`CRS:      ${crsOf()}`);
+  L.push(`Cell:     ${state.dem?.cell} m`);
+  L.push(`Exported: ${new Date().toISOString()}`);
+  L.push("");
+  L.push("WHAT IS IN HERE");
+  L.push("-".repeat(64));
+  L.push("*-channels.shp/.shx/.dbf/.prj  channel reaches, PolyLine");
+  L.push("*-channels.geojson             the same, as LineString");
+  L.push("*-catchments.shp/…             catchment areas, Polygon");
+  L.push("*-catchments.geojson           the same");
+  L.push("*.dxf                          both, R12, classes as LAYERS");
+  L.push("");
+  L.push(`Channel reaches:  ${d.reaches.length}`);
+  L.push(`Catchments:       ${d.catchments.length}  (watershed count reports ${d.count})`);
+  L.push(`Micro cells:      ${d.microCells}`);
+  L.push(`Channel threshold: ${m2(d.minAreaM2)} of contributing area`);
+  L.push("");
+  L.push("HOW THE LINES WERE MADE");
+  L.push("-".repeat(64));
+  L.push("Contributing area is MFD (Freeman 1991) — flow split across up to");
+  L.push("eight downslope neighbours, which is the better model for hillslope");
+  L.push("accumulation. The ROUTING that turns it into a line is D8, steepest");
+  L.push("descent, because a polyline has one downstream end and MFD does not");
+  L.push("give one. Two flow models, each doing what it can do.");
+  L.push("");
+  L.push("A reach runs from a channel head, or from a confluence, down to the");
+  L.push("next confluence. The confluence vertex belongs to both reaches, so");
+  L.push("the network is connected. Attributes are taken at the DOWNSTREAM end.");
+  L.push("");
+  L.push("Catchment boundaries follow CELL EDGES, not an interpolated contour:");
+  L.push("a divide is not a level set of anything, and the polygon encloses");
+  L.push("exactly the cells that drain to that pit. Ring area equals cell count");
+  L.push("times cell area, exactly.");
+  L.push("");
+  L.push("DEPRESSIONS ARE NOT FILLED. That is this project's standing");
+  L.push("convention, and its consequence is faced rather than engineered away:");
+  L.push("ground at 0.25 m holds many small pits, so many cells drain to a");
+  L.push("hollow too small to be a catchment. Those are marked micro=true and");
+  L.push("put on their own DXF layer. They are a measurement about the ground,");
+  L.push("not a failure of the delineation — filter them deliberately if you");
+  L.push("want them gone.");
+  L.push("");
+  L.push("WHAT THIS IS NOT");
+  L.push("-".repeat(64));
+  L.push("These are steepest-descent paths over the bare modelled surface.");
+  L.push("There is no infiltration, no surface roughness, no culvert, no pipe,");
+  L.push("no rainfall event and no soil in this calculation. Nothing here is a");
+  L.push("prediction of where water will go. It is a description of the shape");
+  L.push("of the ground.");
+  L.push("");
+  if (d.epsg == null) {
+    L.push("⚠️ NO .prj IS WRITTEN because the terrain's CRS is not declared.");
+    L.push("   Every GIS reads a missing .prj as 'unstated' and will ask.");
+    L.push("");
+  } else if (Number(d.epsg) !== 25833) {
+    L.push(`⚠️ NO .prj IS WRITTEN. The terrain declares EPSG:${d.epsg}, and this`);
+    L.push("   tool only holds the WKT for EPSG:25833. Nothing was reprojected;");
+    L.push("   the coordinates are the terrain's own. Set the CRS in your GIS.");
+    L.push("");
+  }
+  L.push("The DXF carries no CRS — the format has nowhere to put one. Its");
+  L.push("coordinates are full unshifted eastings and northings, so it opens");
+  L.push("far from the CAD origin. That is deliberate: subtracting an origin");
+  L.push("would produce a file that lines up with nothing.");
+  L.push("");
+  L.push(PROVENANCE);
+  return L.join("\n");
+}
+
 $("chainage-export").addEventListener("click", () => {
   if (!state.dem) { status("load a site first", 3000); return; }
   if (guide.pts.length < 2) {
@@ -7123,6 +8035,38 @@ $("t-contours").addEventListener("click", () => {
   syncContours();
   status(state.contours.on
     ? `contours on · ${state.contours.interval} m` : "contours off", 1200);
+});
+
+/**
+ * RELIEF SHADING STRENGTH (2026-09-02, Marc).
+ *
+ * ⚠️ IT RECOLOURS, IT DOES NOT REMEASURE. `aoStrength` is read inside the
+ * per-vertex shading loop, so the whole surface has to be repainted — but the
+ * sky-view grid it multiplies is untouched, and so is every analysis value.
+ * Nothing here invalidates a measurement, which is why it can ride the `input`
+ * event at slider rate rather than waiting for a settle.
+ *
+ * ⚠️ AND IT DRIVES THE CONTEXT TOO. The backdrop is a second Surface with its
+ * own copy of the term; left out, dragging the slider would have shaded the
+ * patch and left the ground around it at the old strength — a seam that looks
+ * like a data error, which is the same trap `setExaggeration` records for the
+ * three scales.
+ */
+$("ao-strength").addEventListener("input", () => {
+  const v = parseInt(/** @type {HTMLInputElement} */ ($("ao-strength")).value, 10);
+  const k = Math.max(0, Math.min(100, v)) / 100;
+  $("ao-val").textContent = `${Math.round(k * 100)}%`;
+  for (const surf of [state.surface, state.dive?.surface]) {
+    if (!surf) continue;
+    surf.aoStrength = k;
+    // ⚠️ A FADE IN FLIGHT WOULD FIGHT THE SLIDER. `_aoFade` ramps the term in
+    // when occlusion first arrives; while it is running it overwrites the
+    // strength every frame, so a drag during those few hundred milliseconds
+    // would appear to do nothing. Land the fade and take the value.
+    if (surf._aoAnim) { cancelAnimationFrame(surf._aoAnim); surf._aoAnim = 0; }
+    surf._aoFade = 1;
+    surf.updateAll?.();
+  }
 });
 
 $("contour").addEventListener("input", () => {
@@ -7904,7 +8848,8 @@ function refreshSectionViewButtons() {
       const b = document.createElement("button");
       b.dataset.section = String(s.id);
       b.textContent = `${s.name}–${s.name}`;
-      b.title = `look along section ${s.name} — the near side is cut away`;
+      b.title = `look along section ${s.name} — the near side is cut away; `
+        + `the cut stays through an orbit, press again to release it`;
       wrap.appendChild(b);
     }
     wrap.dataset.built = want;
@@ -7963,7 +8908,14 @@ function refreshSectionFace() {
       { verticalExaggeration: currentExaggeration() });
     view.scene.add(sectionFace.group);
   }
-  const p = sampleSection(state.dem, sec.a, sec.b);
+  // ⚠️⚠️ THE FACE IS SAMPLED ALONG THE EXTENDED LINE, not between the clicked
+  // points (2026-08-28). The clip plane is INFINITE — it cuts the whole tile —
+  // so a face spanning only the section left bare open shell running on to the
+  // tile edge, plainly visible in any orbited view. `extendToTile` gives the
+  // plane's full crossing; the clicked points come back as stations on it and
+  // are marked by the verticals that carry the letter.
+  const ext = extendToTile(state.dem, sec.a, sec.b);
+  const p = sampleSection(state.dem, ext.a, ext.b);
   let lo = Infinity;
   for (const z of p.now) if (Number.isFinite(z) && z < lo) lo = z;
   if (!Number.isFinite(lo)) { sectionFace.setVisible(false); return; }
@@ -7973,9 +8925,16 @@ function refreshSectionFace() {
   const span = Math.max(state.dem.nrows, state.dem.ncols) * state.dem.cell;
   const n = view._clipPlane ? view._clipPlane.normal : { x: 0, y: 1 };
   sectionFace.setExaggeration(currentExaggeration());
-  sectionFace.setSection(p, { baseZ: lo - span * 0.05, normal: [n.x, n.y] });
+  sectionFace.setSection(p, {
+    baseZ: lo - span * 0.05,
+    normal: [n.x, n.y],
+    anchors: ext.anchors,
+    name: sec.name,
+    exaggeration: currentExaggeration(),
+  });
   sectionFace.setVisible(true);
 }
+
 
 /**
  * The overlays that mean nothing in a section, hidden while one is up.
@@ -8008,7 +8967,17 @@ function lookAlongSection(id) {
   if (!sec || !state.dem) return;
   leavePlanForCamera();
 
+  // ⚠️ THE BUTTON IS THE RELEASE ONCE YOU HAVE ORBITED AWAY, which is what
+  // Marc asked for in as many words. Square-on the old grammar stands — press
+  // again to view from the other side, a third time to leave — because there
+  // the two sides are the question being asked. Orbited away, the question is
+  // only ever "give me the whole model back", and making that take three
+  // presses would be a puzzle rather than a control.
   const same = sectionView && sectionView.id === id;
+  if (same && sectionView.orbited) {
+    clearSectionView(`released section ${sec.name} — the whole terrain is back`);
+    return;
+  }
   if (same && sectionView.flip) { clearSectionView(`left section ${sec.name}`); return; }
   const flip = !!(same && !sectionView.flip);
 
@@ -8024,7 +8993,7 @@ function lookAlongSection(id) {
   const relief = Math.max((hi - lo) * ex, state.dem.cell * 4);
   const zMid = ((lo + hi) / 2) * ex;
 
-  sectionView = { id, flip };
+  sectionView = { id, flip, orbited: false };
   view.setSectionView(sec.a, sec.b, {
     flip,
     target: [(sec.a[0] + sec.b[0]) / 2, (sec.a[1] + sec.b[1]) / 2, zMid],
@@ -8074,8 +9043,25 @@ $("gizmo-sections").addEventListener("click", (e) => {
 // whole section state has to go, not just the plane, or the gizmo button stays
 // lit over an unclipped scene and the cut face floats in a view that no longer
 // means anything.
-view.onSectionOrbit = () => clearSectionView("orbited out of the section — "
-  + "the cut face belongs to its square-on view");
+// ⚠️⚠️ ORBITING NO LONGER RELEASES THE CLIP (2026-08-28, Marc: "when i go into
+// the section projection and then use the mouse wheel to get back to
+// perspective the cut off is automatically turned off ... could we have it that
+// it stays active until you click on the black section button to release it").
+//
+// ⚠️ THE OLD BEHAVIOUR WAS NOT ARBITRARY, and the note it replaced is worth
+// keeping: a clipped heightfield orbited away from used to be an open shell
+// seen from inside — dark undersides, culled gaps — and it was reported as a
+// render defect. THAT DEFECT IS FIXED, by section-face.js: the cut is now a
+// drawn face rather than a hole, so the model reads as solid from any angle.
+// The release was a workaround for a hole that no longer exists.
+//
+// What orbiting does now is mark the view as no longer square-on, so the next
+// press of the section's own button means "put it back" — see lookAlongSection.
+view.onSectionOrbit = () => {
+  if (!sectionView || sectionView.orbited) return;
+  sectionView.orbited = true;
+  refreshSectionViewButtons();
+};
 
 $("proj").addEventListener("click", () => {
   // Perspective and a section clip are different questions; asking for the
@@ -8217,8 +9203,30 @@ window.addEventListener("keydown", (e) => {
   }
 });
 
+const _sz = new THREE.Vector2();
 view.onFrame = () => {
   $("fps").textContent = `${view.fps} fps`;
+  /**
+   * HOLD THE SECTION'S GROUND LINE AT A CONSTANT WEIGHT ON SCREEN
+   * (2026-09-02, Marc: "fix the section line weight to stay constant on zoom").
+   *
+   * ⚠️ ONE EXPRESSION FOR BOTH PROJECTIONS. view.js sizes the orthographic
+   * frustum from the perspective FOV and the same `dist` — `halfH =
+   * tan(fov/2)·dist` — precisely so the two frame the same thing, so the drawn
+   * metres per pixel is that expression over the viewport height either way.
+   * For perspective it is exact at the target depth, which is where the section
+   * is.
+   *
+   * ⚠️ CHEAP BY CONSTRUCTION. It runs every frame but `_writeRibbon` returns
+   * immediately unless the scale moved more than 2 %, so a still camera costs
+   * one multiply and a comparison — and a zoom rewrites a few hundred vertices,
+   * not the face.
+   */
+  if (!sectionFace || !sectionFace.group.visible) return;
+  view.renderer.getSize(_sz);
+  if (!(_sz.y > 0)) return;
+  const wpp = (2 * Math.tan((view.camera.fov * Math.PI) / 360) * view._cam.dist) / _sz.y;
+  sectionFace.setScreenWeight(wpp, 3);
 };
 
 /* ---------------------------------------------------------------------- boot */
@@ -8226,6 +9234,10 @@ view.onFrame = () => {
 window.dl = {
   view, state, clock, THREE, loadTile, loadFile,
   // test hooks
+  // ⚠️ A GETTER, NOT A VALUE. `sectionFace` is reassigned whenever a section is
+  // cut or the tile changes, so a plain property would hand a test the face from
+  // two sections ago — the same staleness `refreshSectionFace` exists to avoid.
+  get sectionFace() { return sectionFace; },
   brushCfg, applyStroke, Stroke, buildFigure, setShading, setPlants, classItems,
   Substrate, adoptSubstrate, loadSubstrateFile, refreshSubstrate,
   paintSoilAt: (x, y) => applySoilPaint({ x, y }),

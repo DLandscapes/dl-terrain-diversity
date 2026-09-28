@@ -116,7 +116,18 @@ export class Dive {
     /** Buffer the apron asks for; snapped to the context's lattice by apronFit. */
     this.wantBuffer = opts.buffer ?? 10;
 
-    this.surface = new Surface(contextDem, { verticalExaggeration: this.exaggeration });
+    /**
+     * ⚠️ THE BACKDROP IS DRAWN AT A GRADED DENSITY (2026-09-02) — native 4 m in
+     * a ring around the patch, coarsening outward. Measured on the real tiles:
+     * 130,050 triangles becomes 9,192, which is 14x fewer for a backdrop whose
+     * far corners are 500 m from anything the user is looking at.
+     *
+     * ⚠️ AND IT IS THE CONTEXT ONLY. See the note on `Surface.lod`.
+     */
+    this.surface = new Surface(contextDem, {
+      verticalExaggeration: this.exaggeration,
+      lod: { nativeRings: 8, maxLevel: 5 },
+    });
     // ⚠️ The context is a BACKDROP, not the subject. It carries no analysis
     // panels and must never be mistaken for the surface being edited, so it is
     // pushed back visually rather than drawn at full strength.

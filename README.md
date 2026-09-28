@@ -35,18 +35,27 @@ It opens on a **synthetic flat plane**, not on survey data — see
 ## Test it
 
 ```bash
-node terraincare/static/_selftest.mjs     # 547 checks, headless
+node terraincare/static/_selftest.mjs     # 627 checks, headless
 ```
 
 The render suite is browser-only because it asserts on pixels and on the
 geometry the GPU actually receives:
 
 ```
-http://localhost:8994/selftest-render.html   # 162 checks, needs a GPU
+http://localhost:8994/selftest-render.html   # 165 checks, needs a GPU
 ```
 
 Both suites are part of the source, not a CI afterthought. The kernel suite runs
 identically in Node and in the browser, over the same modules the app loads.
+
+> ⚠️ **Eight kernel checks fail in this release, and they are meant to.**
+> Group X6 measures a drawing's stated scale against its own geometry, and seven
+> exported sheets state a scale they are not drawn at. The rows were written to
+> fail against that named defect and stay red until the exporters are fixed — a
+> suite made green by loosening its own checks proves nothing, and the defect is
+> in the sheets, not in the test. The remaining **619 of 627 pass**, as do **165
+> of 165** in the render suite. The scale *bars* on those sheets are already
+> correct; it is the printed ratio that overstates.
 
 ---
 
@@ -83,6 +92,7 @@ one direction), each of which says so on its face.
 - **GeoTIFF** — float32 *values*, not colours; every layer, georeferenced
 - **OBJ** — the surface, and a watertight solid for printing
 - **Shapefile / GeoJSON** — regions with their attributes
+- **DXF** — drainage channels and catchments as CAD layers (R12, layers by class)
 - **SVG / PDF** — grading plan, chainage sections, isopach, slope classes
 - **ZIP** — the lot, with a key and a provenance record
 

@@ -13,6 +13,52 @@
 // layer later without swapping materials.
 
 import * as THREE from "three";
+import { quadtreeIndex } from "./contextlod.js";
+
+/**
+ * sRGB byte → LINEAR float, one entry per possible byte.
+ *
+ * ⚠️⚠️ THE ANALYSIS COLOURS WERE ARRIVING WASHED OUT, AND THIS IS WHY
+ * (2026-09-02, Marc: "the colors of the shader look still quite washed out and
+ * not as powerful and colorful as in the small icon preview").
+ *
+ * `ramps.js` produces sRGB bytes — the same bytes the preview canvas paints,
+ * where they are correct. Written straight into a vertex colour attribute they
+ * are wrong, because three.js treats vertex colours as LINEAR and the renderer
+ * encodes linear→sRGB on output (`outputColorSpace` is "srgb"). That encode
+ * lifts dark channels far more than bright ones, so it compresses the ratio
+ * BETWEEN channels — which is saturation. Nothing clips and nothing looks
+ * broken; the colour is simply weaker than the one the ramp chose.
+ *
+ * ⚠️ MEASURED, AND PREDICTED BEFORE IT WAS MEASURED. Mean saturation of the
+ * TWI layer: 0.5652 in the vertex buffer and in the preview canvas, 0.3107 in
+ * the rendered pixels. Encoding an example pair (0.80, 0.35) to sRGB takes its
+ * saturation from 0.5625 to 0.3091 — the same numbers to three decimals. The
+ * first hypothesis was that the lighting rig (four lights summing to 4.05) was
+ * clipping the bright channel; that was WRONG, and measuring said so — nothing
+ * clipped at all, and dimming the rig to sum 1.0 barely moved saturation.
+ *
+ * ⚠️ AND THE FIX IS NOT A SATURATION SLIDER. A slider would let the user dial
+ * back a defect by eye, and the amount needed would differ per layer and per
+ * shading strength. Converting on the way in makes the output encode return
+ * exactly the bytes the ramp chose, so the terrain and its own legend agree by
+ * construction rather than by adjustment.
+ *
+ * ⚠️ A TABLE, NOT A CALL. This runs three times per vertex on a 65 536-vertex
+ * refresh, and the per-vertex loop is already the whole cost of a repaint.
+ */
+const SRGB_TO_LINEAR = (() => {
+  const t = new Float32Array(256);
+  for (let i = 0; i < 256; i++) {
+    const c = i / 255;
+    t[i] = c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  }
+  return t;
+})();
+
+/** The same conversion for a value already in 0..1 — greys, not ramp bytes. */
+const srgbToLinear = (c) =>
+  (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
 import { DEM } from "./dem.js";
 import { latticeEdges } from "./lattice.js";
 import { contourSegments, niceInterval } from "./contours.js";
@@ -106,6 +152,18 @@ export class Surface {
      * @type {{r0:number,c0:number,r1:number,c1:number}|null}
      */
     this.hole = opts.holeCells ?? null;
+    /**
+     * Graded density for a BACKDROP surface, or null for full resolution.
+     *
+     * ⚠️ OFF BY DEFAULT, AND IT MUST STAY OFF FOR THE DESIGN PATCH. The patch is
+     * the subject: every one of its cells is ground the user can move, the
+     * ledger accounts for, and the analysis reads. Drawing it at a graded
+     * density would hide edits in whichever block happened to be coarse. Only
+     * the context — which is never edited and never analysed — takes it.
+     * @type {{nativeRings?:number, maxLevel?:number,
+     *         focus?:{r0:number,c0:number,r1:number,c1:number}|null}|null}
+     */
+    this.lod = opts.lod ?? null;
     const indices = this._triangleIndex();
 
     const posAttr = new THREE.BufferAttribute(this.positions, 3);
@@ -282,6 +340,15 @@ export class Surface {
   _triangleIndex() {
     const { nrows, ncols } = this.dem;
     const h = this.hole;
+    // ⚠️ THE LOD IS PURELY A DIFFERENT INDEX BUFFER over these same vertices —
+    // same positions, same per-vertex shading, same exaggeration, same hole.
+    // See contextlod.js for why the subdivision runs OUTWARD from the patch.
+    if (this.lod) {
+      return quadtreeIndex(nrows, ncols, {
+        hole: h, focus: this.lod.focus ?? h,
+        nativeRings: this.lod.nativeRings, maxLevel: this.lod.maxLevel,
+      }).indices;
+    }
     // A quad spans cells (r,c)…(r+1,c+1); drop it if ANY corner is in the hole,
     // so no triangle reaches into the opening from outside it.
     const covered = (r, c) => h
@@ -477,15 +544,21 @@ export class Surface {
           // carries its own contrast and would otherwise go muddy in hollows.
           const q = i * 4;
           const lit = 0.35 + 0.65 * shade;
-          this.colors[o] = (this.layer[q] / 255) * lit;
-          this.colors[o + 1] = (this.layer[q + 1] / 255) * lit;
-          this.colors[o + 2] = (this.layer[q + 2] / 255) * lit;
+          // ⚠️ CONVERT FIRST, THEN SHADE. Light multiplies RADIANCE, which is
+          // the linear quantity — shading an sRGB value and converting after
+          // would darken by the wrong curve as well as desaturating.
+          this.colors[o] = SRGB_TO_LINEAR[this.layer[q]] * lit;
+          this.colors[o + 1] = SRGB_TO_LINEAR[this.layer[q + 1]] * lit;
+          this.colors[o + 2] = SRGB_TO_LINEAR[this.layer[q + 2]] * lit;
         } else {
           // Neutral grey, not warm stone. The base shader is the reference the
           // analysis layers are read against, so it should carry no hue of its
           // own — any colour here would tint every layer painted over it and
           // compete with ramps whose whole job is to mean something.
-          const g = 0.95 * shade;
+          // ⚠️ THE BASE GREY CONVERTS TOO. Left in sRGB it would be the one
+          // surface in the app rendering brighter than it is written, and the
+          // reference the layers are read against has to be the honest one.
+          const g = srgbToLinear(0.95 * shade);
           this.colors[o] = g;
           this.colors[o + 1] = g;
           this.colors[o + 2] = g;

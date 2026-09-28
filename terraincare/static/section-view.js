@@ -26,6 +26,54 @@ import { textSprite } from "./dimensions.js";
 
 const INK = 0x1c1a16;
 
+/**
+ * A stepped polyline — horizontal runs at one level, vertical risers where the
+ * level changes.
+ *
+ * ⚠️ THE RISER IS TWO POINTS AT THE SAME X AND Y, which is what makes the corner
+ * 90° rather than merely steep. Sampling the level at each station and joining
+ * the results would give a staircase with sloped treads: every segment would
+ * carry both the run and the rise.
+ *
+ * ⚠️ SUB-SAMPLED BETWEEN STATIONS. A block is several cells wide and the profile
+ * is sampled per cell, so a station-only walk can step up to a cell late. Four
+ * sub-samples put the riser within an eighth of a cell of the block edge — 3 cm
+ * on this site — without needing the exact crossing solved per segment.
+ *
+ * @param {ArrayLike<number>} xs @param {ArrayLike<number>} ys
+ * @param {(x:number,y:number)=>number} zAt the DRAWN level, or NaN off the grid
+ */
+function staircase(xs, ys, zAt) {
+  /** @type {number[]} */ const ox = [];
+  /** @type {number[]} */ const oy = [];
+  /** @type {number[]} */ const oz = [];
+  const SUB = 4;
+  let pz = NaN;
+  const at = (x, y) => {
+    const z = zAt(x, y);
+    if (!Number.isFinite(z)) { pz = NaN; return; }
+    if (!Number.isFinite(pz)) {
+      ox.push(x); oy.push(y); oz.push(z); pz = z; return;
+    }
+    if (z !== pz) {
+      ox.push(x); oy.push(y); oz.push(pz);   // finish the run
+      ox.push(x); oy.push(y); oz.push(z);    // the riser
+      pz = z;
+    }
+  };
+  for (let i = 0; i + 1 < xs.length; i++) {
+    const x0 = xs[i], y0 = ys[i], dx = xs[i + 1] - x0, dy = ys[i + 1] - y0;
+    for (let k = 0; k < SUB; k++) at(x0 + (dx * k) / SUB, y0 + (dy * k) / SUB);
+  }
+  const n = xs.length - 1;
+  if (n >= 0) {
+    at(xs[n], ys[n]);
+    // The final run still needs its far end, which `at` only emits on a change.
+    if (Number.isFinite(pz)) { ox.push(xs[n]); oy.push(ys[n]); oz.push(pz); }
+  }
+  return { xs: ox, ys: oy, zs: oz };
+}
+
 export class SectionOverlay {
   /**
    * @param {import("./dem.js").DEM} dem
@@ -94,12 +142,55 @@ export class SectionOverlay {
     });
     this._materials.push(this._headLine);
     /**
+     * The rubber band drawn while a section is being placed: dashed, because it
+     * is a proposal rather than a cut. Same dash rhythm as the existing-ground
+     * profile, so "dashed means not yet / not any more" reads consistently.
+     */
+    // ⚠ THE DASH IS SCALED TO THE TILE, not fixed. A literal 0.9 m dash reads
+    // as a coarse dot-dash on the 64 m patch and as a SOLID LINE on the 1 km
+    // context, where it falls under a pixel — the same trap `_was` documents
+    // just above. Written fixed first, and corrected on reading that note.
+    this._pendingLine = new THREE.LineDashedMaterial({
+      color: INK, transparent: true, opacity: 0.75,
+      dashSize: span * 0.006, gapSize: span * 0.004,
+      depthTest: false, depthWrite: false, fog: false,
+    });
+    this._materials.push(this._pendingLine);
+    /** Its own group — see the note in `_clear`. */
+    this._pendingGroup = new THREE.Group();
+    this.group.add(this._pendingGroup);
+    /**
      * Letter sprites, cached by section name. Rebuilt sprites would allocate a
      * canvas texture per overlay refresh, and refreshes ride every stroke
      * settle — the cache makes a label a one-time cost per letter.
      * @type {Map<string, THREE.Sprite>}
      */
     this._labels = new Map();
+    /**
+     * The same letters again, drawn BLACK, for the hover state.
+     *
+     * ⚠️ A SECOND CACHE RATHER THAN A RESTYLED SPRITE, because a sprite's
+     * appearance IS its canvas texture: there is no colour to set at draw
+     * time. Swapping the material swaps the glyph, and the two are the same
+     * text at the same metrics, so the mark does not move when it lights up.
+     * @type {Map<string, THREE.SpriteMaterial>}
+     */
+    this._hotLabels = new Map();
+    /**
+     * Where each drawn section head IS, in world coordinates, so the app can
+     * hit-test one without recomputing the placement.
+     *
+     * ⚠️⚠️ PUBLISHED RATHER THAN RE-DERIVED, and that is the point. The head
+     * sits GAP + R * 0.68 up the bisector from an end, on the left of the cut
+     * direction — five constants and a sign, all local to `_annotate`. A hit
+     * test that recomputed them would be correct until the day the symbol is
+     * restyled again, and then it would be silently aiming at where the mark
+     * used to be. This is the mark's own answer to "where are you".
+     * @type {{name:string, x:number, y:number, z:number, sprite:THREE.Sprite}[]}
+     */
+    this.heads = [];
+    /** the head the pointer is over, by section name */
+    this._hotName = null;
     /** how many line objects the last update drew, for the self-test */
     this.count = 0;
     /** the last setSections call, so setExaggeration can rebake a fold */
@@ -123,8 +214,57 @@ export class SectionOverlay {
   /** @param {boolean} on */
   setVisible(on) { this.group.visible = !!on; }
 
+  /**
+   * @param {THREE.Sprite} sp @param {string} name @param {boolean} on
+   */
+  _paintHot(sp, name, on) {
+    if (!on) {
+      const cold = /** @type {any} */ (sp)._cold;
+      if (cold) sp.material = cold;
+      return;
+    }
+    let hot = this._hotLabels.get(name);
+    if (!hot) {
+      // ⚠️ THE HEIGHT IS TAKEN FROM THE COLD SPRITE ITSELF, not recomputed from
+      // the tile. Only the MATERIAL is swapped, so the sprite keeps its own
+      // scale and the glyph cannot change size — and the sizing rule (a span
+      // fraction, floored at three cells, shrunk for two characters) stays in
+      // the one place that owns it. Written recomputed first, which is the
+      // drift the heads array exists to avoid.
+      const probe = textSprite(name, { worldHeight: sp.scale.y, colour: "#000000" });
+      hot = /** @type {THREE.SpriteMaterial} */ (probe.material);
+      this._hotLabels.set(name, hot);
+    }
+    sp.material = hot;
+  }
+
+  /**
+   * Light up one section's letters, or none.
+   *
+   * ⚠️ THE AFFORDANCE, NOT DECORATION (2026-08-28, Marc: "when you hover over
+   * one of the sections where the text is now gray, the letter should
+   * highlight in black indicating that i can click on it"). Ctrl+click on a
+   * head cuts to that section, and a control that gives no sign it is a
+   * control is a control nobody finds.
+   *
+   * @param {string|null} name
+   * @returns {boolean} true if the highlight changed
+   */
+  setHot(name) {
+    if (name === this._hotName) return false;
+    this._hotName = name;
+    for (const h of this.heads) this._paintHot(h.sprite, h.name, h.name === name);
+    return true;
+  }
+
   _clear() {
     for (const c of [...this.group.children]) {
+      // ⚠️ THE PENDING PREVIEW IS NOT PART OF THE DRAWN SECTIONS and must
+      // survive a rebuild. It updates at pointer rate while a section is being
+      // drawn, whereas setSections re-samples every profile — so the two are
+      // kept in separate groups and never rebuilt together. Wiping it here
+      // would clear the rubber band on the first settle after the anchor drops.
+      if (c === this._pendingGroup) continue;
       this.group.remove(c);
       // Cached letter sprites are REUSED across refreshes — and a Sprite's
       // geometry is shared class-wide in three.js, so disposing it here would
@@ -144,7 +284,13 @@ export class SectionOverlay {
    * @param {number} bx @param {number} by  trace ends, world XY
    * @param {number} z  the plane the marks lie in
    */
-  _annotate(name, ax, ay, bx, by, z) {
+  _annotate(name, ax, ay, bx, by, z, opts = {}) {
+    // `target` and `firstOnly` exist for the placement preview: while a section
+    // is being drawn only the ANCHORED end has a head, and it is drawn into the
+    // pending group so it can be rebuilt at pointer rate without touching the
+    // sections themselves.
+    const target = opts.target || this.group;
+    const ends = opts.firstOnly ? [[ax, ay]] : [[ax, ay], [bx, by]];
     const { originX, originY } = this.dem;
     const dx = bx - ax, dy = by - ay;
     const len = Math.hypot(dx, dy);
@@ -178,6 +324,33 @@ export class SectionOverlay {
     const R = s * 0.95;
 
     /**
+     * ⚠️⚠️ THE HEAD STANDS OFF THE CUTTING LINE (2026-08-28, Marc: "the triangle
+     * should have a distance to the section line"). RAISED, NOT SILENTLY
+     * REVERSED: the note below records the 2026-08-13 decision that the base
+     * lies ON the line, "which is how a section head relates to its cutting
+     * line in drafting rather than floating beside it". Both conventions are
+     * drawn in practice, and at the zoom this overlay is read at a base sitting
+     * exactly on the trace merges with it — the gap is what keeps the head a
+     * mark ON the drawing rather than a thickening OF the line.
+     *
+     * ⚠️ MEASURED, NOT GUESSED, AND THEN PULLED BACK IN. At R * 0.55 the trace
+     * still met the base corner when rendered and zoomed: the gap existed
+     * arithmetically and did not read. R * 1.15 was the first value where the
+     * air was unmistakable — and, seen in use, unmistakably too much (Marc,
+     * 2026-09-02: "graphically the arrow could be closer to the section line").
+     * R * 0.70 sits between the two: above the value proven not to read, well
+     * under the one that detached the head from its own line. Both earlier
+     * numbers are kept here because they are the bracket this one sits in.
+     *
+     * ⚠️ IT IS DECLARED HERE, NOT INSIDE `pin`, BECAUSE THE LETTER NEEDS IT TOO.
+     * The letter rides up the bisector measured FROM THE BASE, so lifting the
+     * outline without lifting the label left the "A" stranded on the cutting
+     * line outside its own triangle — which is the exact defect the 2026-08-13
+     * note says the mark was redesigned to cure. One constant, both users.
+     */
+    const GAP = R * 0.70;
+
+    /**
      * ⚠️ ONE CLOSED OUTLINE — A DROP, NOT A CIRCLE PLUS AN ARROW (Marc's
      * sketch, 2026-08-13). The mark was a ring with a separate triangle beside
      * it: two shapes the eye has to assemble, and the pair was what put a fill
@@ -206,13 +379,25 @@ export class SectionOverlay {
       // ⚠️ THE BASE MIDPOINT IS THE SECTION'S END, so the shape stands wholly
       // on the viewing side and the line runs into its base — never through
       // the letter, which was the original defect.
+      // ⚠️⚠️ THE HEAD NOW STANDS OFF THE CUTTING LINE (2026-08-28, Marc: "the
+      // triangle should have a distance to the section line"). RAISED, NOT
+      // SILENTLY REVERSED: the note above says the base lies ON the line
+      // "which is how a section head relates to its cutting line in drafting
+      // rather than floating beside it", and that was the 2026-08-13 decision.
+      // Both conventions are drawn in practice — heads on the line, and heads
+      // set off it with the line running to a stop short of the mark — and at
+      // the sizes this overlay is read at, a base sitting exactly on the trace
+      // merges with it and the shape stops reading as a separate symbol. The
+      // gap is what makes it a mark ON a drawing rather than a thickening OF
+      // the line.
+      const bxm = ex + px * GAP, bym = ey + py * GAP;   // base midpoint, lifted
       const w = R * 1.18;      // half the base
       const h = R * 2.00;      // apex height above it
       const rr = R * 0.30;     // corner radius
       const corners = [
-        [ex - ux * w, ey - uy * w],
-        [ex + px * h, ey + py * h],
-        [ex + ux * w, ey + uy * w],
+        [bxm - ux * w, bym - uy * w],
+        [bxm + px * h, bym + py * h],
+        [bxm + ux * w, bym + uy * w],
       ];
       /** @type {number[][]} */
       const pts = [];
@@ -249,19 +434,55 @@ export class SectionOverlay {
         }
       }
       pts.push(pts[0]);                             // closed
-      const arr = new Float32Array((pts.length - 1) * 6);
-      for (let i = 0; i + 1 < pts.length; i++) {
-        const o = i * 6;
-        arr[o] = pts[i][0] - originX; arr[o + 1] = pts[i][1] - originY; arr[o + 2] = z;
-        arr[o + 3] = pts[i + 1][0] - originX; arr[o + 4] = pts[i + 1][1] - originY;
-        arr[o + 5] = z;
+
+      /**
+       * ⚠️⚠️ THE STROKE IS THICKENED BY DRAWING THE OUTLINE THREE TIMES, NOT BY
+       * `linewidth` (2026-08-28, Marc: "a little thicker in stroke width").
+       * `_headLine` is a LineBasicMaterial, and WebGL caps line width at one
+       * pixel: MEASURED on this machine as
+       * `gl.getParameter(gl.ALIASED_LINE_WIDTH_RANGE)` → **[1, 1]**. Setting
+       * `linewidth` would have changed nothing while LOOKING like a fix — the
+       * same shape of mistake as phase 16's `white-space: nowrap` that took
+       * effect and did nothing.
+       *
+       * So the mark is stroked as three concentric passes, offset along the
+       * outward normal from the shape's own centroid. The shape is convex, so
+       * for a small offset that normal IS the parallel offset direction and the
+       * passes stay tangent rather than crossing at the rounded corners.
+       *
+       * ⚠️ THIS THICKENS ONLY THE SECTION HEAD, deliberately. Everything else in
+       * the overlay stays one weight; the head is the one mark that has to be
+       * found before it is read, and it now carries the extra weight that says
+       * so. If the whole overlay ever needs real strokes, that is Line2 from
+       * three.js's examples and a second vendored file — a bigger decision than
+       * this one.
+       */
+      let cx = 0, cy = 0;
+      for (let i = 0; i + 1 < pts.length; i++) { cx += pts[i][0]; cy += pts[i][1]; }
+      cx /= (pts.length - 1); cy /= (pts.length - 1);
+      const STROKE = R * 0.045;                     // half the drawn weight
+      const PASSES = [-STROKE, 0, STROKE];
+      const arr = new Float32Array((pts.length - 1) * 6 * PASSES.length);
+      let o = 0;
+      for (const off of PASSES) {
+        const at = (p) => {
+          const nx = p[0] - cx, ny = p[1] - cy;
+          const L = Math.hypot(nx, ny) || 1;
+          return [p[0] + (nx / L) * off, p[1] + (ny / L) * off];
+        };
+        for (let i = 0; i + 1 < pts.length; i++) {
+          const A = at(pts[i]), B = at(pts[i + 1]);
+          arr[o] = A[0] - originX; arr[o + 1] = A[1] - originY; arr[o + 2] = z;
+          arr[o + 3] = B[0] - originX; arr[o + 4] = B[1] - originY; arr[o + 5] = z;
+          o += 6;
+        }
       }
       const g = new THREE.BufferGeometry();
       g.setAttribute("position", new THREE.BufferAttribute(arr, 3));
       const m = new THREE.LineSegments(g, this._headLine);
       m.renderOrder = 12;
       m.frustumCulled = false;
-      this.group.add(m);
+      target.add(m);
     };
 
     /**
@@ -293,13 +514,28 @@ export class SectionOverlay {
       // One cached sprite per letter but TWO ends want it — clone shares the
       // material and texture, so the cost stays one canvas per letter.
       const use = sp.parent ? sp.clone() : sp;
-      // A third of the way up the bisector, from the base on the cutting line.
-      const up = R * 2.00 * 0.34;
+      // ⚠️ THE COLD MATERIAL IS REMEMBERED ON THE SPRITE, not looked up later.
+      // The first end reuses the CACHED object itself rather than a clone, so
+      // lighting it up mutates the cache; without somewhere to put the original
+      // back, a hover would leave that letter permanently black.
+      /** @type {any} */ (use)._cold = use.material;
+      // A third of the way up the bisector, measured from the base — which now
+      // stands GAP clear of the cutting line, so the letter is lifted with it.
+      const up = GAP + R * 2.00 * 0.34;
       use.position.set(ex + px * up - originX, ey + py * up - originY, z);
-      this.group.add(use);
+      target.add(use);
+      // ⚠️ ONLY THE REAL SECTIONS ARE PICKABLE. The placement preview draws a
+      // head too, into its own group, and registering it would let the user
+      // ctrl-click a section that does not exist yet.
+      if (target === this.group) {
+        this.heads.push({
+          name, x: ex + px * up, y: ey + py * up, z, sprite: use,
+        });
+        if (name === this._hotName) this._paintHot(use, name, true);
+      }
     };
 
-    for (const [ex, ey] of [[ax, ay], [bx, by]]) {
+    for (const [ex, ey] of ends) {
       pin(ex, ey);       // one outline, its point along the view direction
       letter(ex, ey);    // in the round half, with nothing over it
     }
@@ -321,9 +557,73 @@ export class SectionOverlay {
    * @param {{name: string, profile: any}[]} sections
    * @param {{selected?: string|null, folded?: boolean}} [opts]
    */
+  /**
+   * The live preview while a section is being placed: the anchored end's head,
+   * and a dashed band from it to wherever the cursor is.
+   *
+   * ⚠️ THIS IS THE ONLY FEEDBACK THE FIRST CLICK USED TO HAVE (2026-08-28,
+   * Marc: "when you first click with the left mouse button there is no visual
+   * feedback"). Before this the anchor existed only as `state.sections.pending`
+   * and a status line — the drawing said nothing at all, so the user had to
+   * remember where they had clicked.
+   *
+   * ⚠️ IT IS DELIBERATELY CHEAP. It rebuilds on every pointer move, so it draws
+   * two objects and sizes nothing it does not have to. `setSections` re-samples
+   * every profile in the scene and must never be called from a move handler.
+   *
+   * @param {number[]|null} a  the anchored end, world XY, or null to clear
+   * @param {number[]|null} b  the cursor, world XY, or null for the head alone
+   * @param {string} [name]    the letter the finished section will carry
+   */
+  setPending(a, b, name = "?") {
+    const g = this._pendingGroup;
+    for (const c of [...g.children]) {
+      g.remove(c);
+      if (/** @type {any} */ (c).isSprite) continue;
+      /** @type {any} */ (c).geometry?.dispose();
+    }
+    if (!a) return;
+    const { originX, originY, cell, ncols, nrows } = this.dem;
+    // Nearest-cell ground height; the marks sit in that plane. depthTest is off
+    // so this is about being in the right place, not about being occluded.
+    const zAt = (x, y) => {
+      const c = Math.floor((x - originX) / cell), r = Math.floor((y - originY) / cell);
+      if (c < 0 || r < 0 || c >= ncols || r >= nrows) return null;
+      const v = this.dem.z[r * ncols + c];
+      return Number.isFinite(v) ? v : null;
+    };
+    const za = zAt(a[0], a[1]);
+    if (za === null) return;
+
+    if (b) {
+      const zb = zAt(b[0], b[1]);
+      const pos = new Float32Array([
+        a[0] - originX, a[1] - originY, za,
+        b[0] - originX, b[1] - originY, zb === null ? za : zb,
+      ]);
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+      const l = new THREE.Line(geo, this._pendingLine);
+      l.computeLineDistances();          // or LineDashedMaterial renders solid
+      l.frustumCulled = false;
+      l.renderOrder = 12;
+      g.add(l);
+    }
+    // The head at the anchor only: the far end is not placed yet, and drawing a
+    // head there would claim a decision the user has not made.
+    const bx = b ? b[0] : a[0] + cell, by = b ? b[1] : a[1];
+    if (bx !== a[0] || by !== a[1]) {
+      this._annotate(name, a[0], a[1], bx, by, za, { target: g, firstOnly: true });
+    }
+  }
+
   setSections(sections, opts = {}) {
     this._last = { sections, opts };
     this._clear();
+    // ⚠️ THE HEADS ARE REBUILT WITH THE DRAWING, never carried over. They hold
+    // sprite references into a group that `_clear` has just emptied; kept, they
+    // would be a hit test aiming at marks that are no longer in the scene.
+    this.heads = [];
     this.count = 0;
     const { originX, originY } = this.dem;
     const line = (xs, ys, zs, mat, dashed) => {
@@ -397,7 +697,24 @@ export class SectionOverlay {
       if (hasWas) {
         line(p.x, p.y, p.was, this._was, true);
       }
-      line(p.x, p.y, p.now, this._now, false);
+      // ⚠️⚠️ STEPPED WHEN THE GROUND IS DRAWN AS BLOCKS (Marc, 2026-09-27). A
+      // smooth section over a voxel surface has the drawing and the model
+      // disagreeing about what the ground is — the line curves through cubes it
+      // is supposed to be a cut through. `stepZ` reads the levels voxels.js
+      // actually drew, so the two agree by construction rather than by matching
+      // parameters.
+      //
+      // ⚠️ THE EXISTING-GROUND LINE IS LEFT SMOOTH, and that is a decision. There
+      // is no voxel surface for the baseline: stepping it to the CURRENT blocks
+      // would draw a staircase the model never showed and imply the old ground
+      // had been blocks too. It only appears where ground has been edited, so on
+      // untouched ground the question does not arise.
+      if (opts.stepZ) {
+        const st = staircase(p.x, p.y, opts.stepZ);
+        line(st.xs, st.ys, st.zs, this._now, false);
+      } else {
+        line(p.x, p.y, p.now, this._now, false);
+      }
       {
         const n = p.x.length;
         const zA = [...p.now].find((v) => Number.isFinite(v));

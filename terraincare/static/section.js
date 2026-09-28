@@ -146,6 +146,57 @@ export function sectionAreas(p) {
 }
 
 /** Section names run A, B, … Z, then AA. Same convention as a drawing sheet. */
+/**
+ * ⚠️ THIS LIVES HERE SO IT CAN BE TESTED (2026-09-02). It was written in
+ * `app.js`, which the kernel suite never loads — the same complaint that file's
+ * own note records about `stepLayer`. It is pure geometry over a DEM's extent
+ * and has no business being unreachable from the suite; group X1 measures it.
+ */
+/**
+ * Run a section's line out to where it leaves the tile, both ways.
+ *
+ * ⚠️ IT IS THE PLANE THAT IS BEING DRAWN, NOT THE LINE. A section clip is a
+ * half-space, so the ground is cut from edge to edge of the tile whatever two
+ * points were clicked; this returns the ends of that cut, plus where the
+ * clicked points fall along it as stations in metres from the new start.
+ *
+ * ⚠️ CLIPPED PARAMETRICALLY (Liang–Barsky), NOT BY WALKING OUTWARD. A fixed
+ * over-extension would fall short on a diagonal — the tile's diagonal is 1.41×
+ * its side — and overshoot on an axis-aligned cut, and sampleSection would
+ * happily return a run of NaN past the edge that the face then has to discard.
+ *
+ * @param {import("./dem.js").DEM} dem
+ * @param {number[]} a @param {number[]} b  the clicked points, world XY
+ * @returns {{a:number[], b:number[], anchors:number[]}}
+ */
+export function extendToTile(dem, a, b) {
+  const dx = b[0] - a[0], dy = b[1] - a[1];
+  const len = Math.hypot(dx, dy);
+  if (!len) return { a, b, anchors: [0, 0] };
+  const x0 = dem.originX, y0 = dem.originY;
+  const x1 = x0 + dem.ncols * dem.cell, y1 = y0 + dem.nrows * dem.cell;
+  // t is in units of the clicked span, so t = 0 and t = 1 are the two clicks.
+  let t0 = -Infinity, t1 = Infinity;
+  const slab = (p, q) => {
+    // p·t <= q for the half-plane; p === 0 means the line is parallel to it
+    if (Math.abs(p) < 1e-12) return q >= 0;
+    const r = q / p;
+    if (p < 0) { if (r > t0) t0 = r; } else if (r < t1) t1 = r;
+    return true;
+  };
+  const ok = slab(-dx, a[0] - x0) && slab(dx, x1 - a[0])
+    && slab(-dy, a[1] - y0) && slab(dy, y1 - a[1]);
+  // ⚠️ NEVER SHORTER THAN THE SECTION ITSELF. A degenerate clip must fall back
+  // to the drawn line rather than to a fragment of it — a face that quietly
+  // stopped short would look like the terrain had a hole in it.
+  if (!ok || !(t1 > t0)) return { a, b, anchors: [0, len] };
+  t0 = Math.min(t0, 0); t1 = Math.max(t1, 1);
+  const A = [a[0] + dx * t0, a[1] + dy * t0];
+  const B = [a[0] + dx * t1, a[1] + dy * t1];
+  // Stations of the two clicked points, measured from the extended start.
+  return { a: A, b: B, anchors: [-t0 * len, (1 - t0) * len] };
+}
+
 export function sectionName(index) {
   let n = index, out = "";
   do { out = String.fromCharCode(65 + (n % 26)) + out; n = Math.floor(n / 26) - 1; }
@@ -182,6 +233,21 @@ function niceTicks(lo, hi, target = 5) {
 }
 
 /** A round-ish number for a printed scale denominator. */
+/**
+ * Metres per division for a graphic scale bar, across a run of `span` metres.
+ *
+ * ⚠️ WHOLE METRES ONLY, and that is not fussiness. The bar's figures are written
+ * with toFixed(0), so a 2.5 m division prints "0 3 5" and the middle tick states
+ * a distance the bar does not have. Returns 0 when even one metre of division
+ * would overrun the drawing, and the caller then draws no bar rather than a
+ * wrong one.
+ */
+function barDivision(span) {
+  let best = 0;
+  for (const v of [1, 2, 5, 10, 20, 50, 100, 200, 500]) if (2 * v <= span) best = v;
+  return best;
+}
+
 function niceScale(v) {
   const steps = [1, 2, 2.5, 5, 10];
   const mag = Math.pow(10, Math.floor(Math.log10(v)));
@@ -269,9 +335,15 @@ export function sectionSVG(sections, opts = {}) {
   };
   // Measured, not guessed: the plan opens at balY + 24 (which is ROW + 10) and
   // its last mark is the scale-bar figures at h + 25 below that.
+  // ⚠️ A ROW WITHOUT A PLAN STRIP STILL NEEDS ROOM FOR ITS SCALE BAR. The bar
+  // used to live INSIDE the plan block, so a section exported without a plan
+  // band printed "horizontal 1:20" and drew nothing a rule could be laid
+  // against — which is exactly what section-designed.svg does. 18 mm carries
+  // the bar and its figures; ROW itself is measured to the balance labels.
+  const BAR_ROOM = 18;
   const rowH = (k) => {
     const p = planFor(k);
-    return ROW + (p ? p.h + 40 : 0);
+    return ROW + (p ? p.h + 40 : BAR_ROOM);
   };
   let H = PAD * 2;
   for (let k = 0; k < sections.length; k++) H += rowH(k) + GAP;
@@ -529,6 +601,38 @@ export function sectionSVG(sections, opts = {}) {
         + `net ${net >= 0 ? "+" : "−"}${Math.abs(net).toFixed(2)} m²</text>`);
     }
 
+    /**
+     * The graphic scale bar.
+     *
+     * ⚠️ A GRAPHIC SCALE SURVIVES REPRODUCTION; a printed ratio does not. A sheet
+     * photocopied at 94 % still carries a bar that measures correctly, and
+     * "1:100" on the same sheet is then simply wrong.
+     *
+     * ⚠️⚠️ DRAWN AT THE SECTION'S OWN mm-PER-METRE, not the plan strip's. They
+     * are equal whenever the band is as long as the section, which is the usual
+     * case and was why the old placement went unnoticed — but the bar is a claim
+     * about the CHAINAGE, so it has to be built from the mapping the chainage is
+     * drawn with.
+     */
+    const drawScaleBar = (sy) => {
+      const mmPerMx = p.length ? plotW / p.length : 0;
+      const barM = barDivision(p.length);
+      if (!(barM > 0) || !(mmPerMx > 0)) return;
+      const bw = barM * mmPerMx, bx = X(0);
+      for (let i = 0; i < 4; i++) {
+        parts.push(`<rect class="bar" fill="${i % 2 ? "#1c1a16" : "none"}" `
+          + `x="${(bx + i * bw / 2).toFixed(2)}" y="${sy.toFixed(2)}" `
+          + `width="${(bw / 2).toFixed(2)}" height="2.2"/>`);
+      }
+      for (let i = 0; i <= 2; i++) {
+        parts.push(`<text class="axl" x="${(bx + i * bw).toFixed(2)}" `
+          + `y="${(sy + 6).toFixed(2)}" text-anchor="middle">`
+          + `${(i * barM).toFixed(0)}</text>`);
+      }
+      parts.push(`<text class="axl" x="${(bx + 2 * bw + 3).toFixed(2)}" `
+        + `y="${(sy + 6).toFixed(2)}">metres</text>`);
+    };
+
     // ── the plan strip ───────────────────────────────────────────────────────
     // ⚠️ ALIGNED WITH THE PROFILE ABOVE IT, WHICH IS THE WHOLE POINT. Same left
     // edge, same width, same metre — so a feature read on the section can be
@@ -650,27 +754,11 @@ export function sectionSVG(sections, opts = {}) {
         + `y="${(dimY + 4.2).toFixed(2)}" text-anchor="middle">`
         + `${p.length.toFixed(1)} m</text>`);
 
-      // ── the scale bar ────────────────────────────────────────────────────
-      // ⚠️ A GRAPHIC SCALE SURVIVES REPRODUCTION; a printed ratio does not. A
-      // sheet photocopied at 94% still carries a bar that measures correctly,
-      // and "1:100" on the same sheet is then simply wrong.
-      {
-        const barM = niceScale(p.length / 5);
-        const bw = barM * mmPerM, sy = dimY + 12;
-        const bx = X(0);
-        for (let i = 0; i < 4; i++) {
-          parts.push(`<rect class="bar" fill="${i % 2 ? "#1c1a16" : "none"}" `
-            + `x="${(bx + i * bw / 2).toFixed(2)}" y="${sy.toFixed(2)}" `
-            + `width="${(bw / 2).toFixed(2)}" height="2.2"/>`);
-        }
-        for (let i = 0; i <= 2; i++) {
-          parts.push(`<text class="axl" x="${(bx + i * bw).toFixed(2)}" `
-            + `y="${(sy + 6).toFixed(2)}" text-anchor="middle">`
-            + `${(i * barM).toFixed(0)}</text>`);
-        }
-        parts.push(`<text class="axl" x="${(bx + 2 * bw + 3).toFixed(2)}" `
-          + `y="${(sy + 6).toFixed(2)}">metres</text>`);
-      }
+      drawScaleBar(dimY + 12);
+    } else {
+      // ⚠️ THE SHEET STATES A SCALE, SO IT DRAWS ONE — with or without a plan
+      // strip. This branch is the one section-designed.svg takes.
+      drawScaleBar(balY + 19);
     }
     parts.push(`</g>`);
     top += rowH(k) + GAP;

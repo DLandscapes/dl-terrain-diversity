@@ -69,11 +69,17 @@ export class PatchOverlay {
     // because they are the one figure each patch states.
     this._seamMat = new THREE.LineBasicMaterial({
       color: INK, transparent: true, opacity: 0.45,
-      depthTest: false, depthWrite: false, fog: false,
+      // ⚠️ DEPTH-TESTED (2026-09-27, Marc: "fix the other overlays for the
+      // tilted view"). Off is right for a PLAN overlay — looking straight down
+      // nothing occludes anything — and wrong the moment the camera tilts, where
+      // linework showing through the ridge in front of it stops being a reading
+      // and becomes noise. Safe here because this overlay already lifts itself
+      // clear of the surface; the ones that do not keep the flag they have.
+      depthTest: true, depthWrite: false, fog: false,
     });
     this._tickMat = new THREE.LineBasicMaterial({
       color: INK, transparent: true, opacity: 0.95,
-      depthTest: false, depthWrite: false, fog: false,
+      depthTest: true, depthWrite: false, fog: false,
     });
     /** @type {Int32Array|null} */ this._labels = null;
     /** @type {any[]|null} */ this._patches = null;

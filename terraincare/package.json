@@ -1,9 +1,10 @@
 {
-  "name": "dl-terrain-diversity",
-  "version": "0.12.0",
+  "name": "dl-terraindiversity",
+  "version": "0.11.0",
+  "private": true,
   "description": "DL-TerrainDiversity — a Terrain Design Information Model (TDIM). A terrain analysis instrument; not a prediction.",
   "author": "Digital Landscapes (Marc-Eduard Ihle)",
-  "license": "Apache-2.0",
+  "license": "SEE LICENSE IN LICENSE",
   "//": "NO \"type\" FIELD ON PURPOSE. Declaring \"module\" makes every .js in this package ESM, which breaks tools/abstract-docx.js — it uses require(). It is also unnecessary: the ESM entry points are all .mjs (static/_selftest.mjs, tools/*.mjs) and static/*.js are loaded by the browser via <script type=\"module\">, which never consults this file. node --check will NOT catch the breakage; it only parses.",
   "scripts": {
     "test": "node static/_selftest.mjs",

@@ -40,6 +40,10 @@ const SECTIONS = ["site", "substrate", "ortho", "photos", "section", "shape",
   // <details class="sub"> without adding it here is a bug that only shows on
   // the next reload, which is why it keeps being missed.
   "view-glyphs",
+  // ⚠️ 2026-09-02, and the FIFTH time this note has had to be written: Display's
+  // Context fold. A <details class="sub"> added to the markup without a line
+  // here forgets its state on reload while its neighbours remember.
+  "view-context",
   "measured", "view", "export"];
 
 /**
@@ -101,6 +105,19 @@ try {
     if (at < 1) {
       stored.terrain = true;    // Import opened on four folded headers
       localStorage.setItem(MIGRATION, "1");
+    }
+    // ⚠️ AND STRAIGHT BACK AGAIN (2026-09-02, Marc: "all menus should be
+    // collapsed by default … also the submenus"). Migration 1 above opened
+    // Terrain because Import landed on four folded headers with nothing to
+    // read; the standing instruction now is that NOTHING is expanded on load,
+    // panels or subs, and that outranks it. Both steps are kept rather than
+    // the first being edited away: migration 1 already ran in browsers that
+    // have been here, so deleting it would leave them at a state neither
+    // version intends. This is the versioned marker doing exactly the job its
+    // own note describes.
+    if (at < 2) {
+      stored.terrain = false;
+      localStorage.setItem(MIGRATION, "2");
     }
     for (const s of SECTIONS) {
       // ⚠️ TOP-LEVEL PANELS DO NOT RESTORE (Marc, 2026-08-19): the tool opens
@@ -281,18 +298,71 @@ for (const s of PANELS) {
       const fold = document.createElement("details");
       fold.className = "sub";
       fold.id = "sec-view-layer";
+      /**
+       * ⚠️⚠️ OPEN, BECAUSE `#sec-read` WAS OPEN (2026-09-02, Marc: "where are
+       * the shaders again — i cannot find them").
+       *
+       * This grid used to live in a section that carried `open` in the markup,
+       * so the seventeen maps were ON SCREEN the moment the app loaded. Moving
+       * it into Display was right — choosing what is drawn on the ground is a
+       * display decision, which is the argument above — but the move built a
+       * fresh <details> and a fresh <details> is CLOSED. Display is closed by
+       * default too, so the tool went from "the maps are the first thing you
+       * see" to "the maps are behind two folds, under a subhead that does not
+       * use the word anybody calls them by". Nothing was broken and nothing
+       * reported an error; the feature simply became unfindable.
+       *
+       * ⚠️ THE STATE TRAVELS WITH THE CONTENT. That is the general lesson and
+       * it is the same one the five orphaned captions taught: when something
+       * moves, whatever was true OF it has to move too — here, that it was open.
+       */
+      /**
+       * ⚠️ COLLAPSED, LIKE EVERYTHING ELSE (2026-09-02, Marc: "all menus should
+       * be collapsed by default … also the submenus like the analysis layers").
+       * Opened here for one revision, to cure "where are the shaders, i cannot
+       * find them" — the grid used to sit in a section that carried `open`, and
+       * the move into Display silently dropped that. Marc'''s answer to the same
+       * problem is the opposite one and it is his call: the menu starts shut,
+       * every panel and every sub, and the maps are found by opening Display
+       * rather than by being pushed at you on load. Kept as a note rather than
+       * deleted so nobody "fixes" the findability again by reopening it.
+       */
       const sum = document.createElement("summary");
       sum.className = "subhead";
       // Display's subs name the THING, per the phase-11 naming rule —
       // Surface, Voxels, Attribute glyphs. So: the layer itself.
-      sum.textContent = "Analysis layer";
+      //
+      // ⚠️ AND THE THING IS CALLED A SHADER BY THE PERSON LOOKING FOR IT. Marc
+      // has now asked for these twice by that name (2026-09-02, 2026-09-27) and
+      // found neither time. "Analysis layer" is what the modules call it;
+      // "Shaders" is what it is called out loud, and a control nobody can name
+      // is a control nobody can find. The tooltip carries the long form so the
+      // shorter label costs no precision.
+      sum.textContent = "Shaders";
+      sum.title = "the terrain analysis drawn on the ground \u2014 cut / fill, closed "
+        + "depressions, wetness, ruggedness and the rest";
       const inner = document.createElement("div");
       inner.className = "sec-body";
       inner.appendChild(grid);
       fold.append(sum, inner);
-      // First, because what is drawn on the ground is the first display
-      // decision — the representation and the glyphs modify what it shows.
-      body.insertBefore(fold, body.firstChild);
+      /**
+       * ⚠️ AFTER THE Surface / Voxels ROW, NOT BEFORE IT (2026-09-02, Marc:
+       * "the choice between surface or voxels should be first in the display
+       * menu"). This used to insert at `body.firstChild`, which put the
+       * analysis grid above the representation buttons — so the panel opened on
+       * a fold rather than on the choice everything else in it qualifies.
+       *
+       * The earlier note argued the opposite: "first, because what is drawn on
+       * the ground is the first display decision". Marc's ordering is the
+       * better one and the reason is in his own phrasing — Surface / Voxels is
+       * a CHOICE between two representations, and Analysis layer, Surface,
+       * Voxels and Context are all settings OF whichever is chosen. The choice
+       * comes before the things that qualify it.
+       */
+      const repRow = document.getElementById("view-rep-row");
+      const after = repRow && repRow.parentElement === body
+        ? repRow.nextSibling : body.firstChild;
+      body.insertBefore(fold, after);
     }
   }
 }
@@ -477,8 +547,10 @@ function badgeText(sec) {
       break;
     }
     case "read": {
-      const active = document.querySelector("#panels .raster.active span");
-      if (active) parts.push(active.textContent.trim());
+      // ⚠️ THE ACTIVE SHADER IS REPORTED BY `view` NOW, not here. This panel is
+      // removed from the left column by move() as soon as its body is docked on
+      // the right, so whatever this case says is said to nobody. The reading
+      // went where the grid went — see the note in `view`.
       if (on("t-water")) parts.push("rain");
       break;
     }
@@ -496,13 +568,38 @@ function badgeText(sec) {
       }
       break;
     }
-    case "view":
+    case "view": {
+      /**
+       * ⚠️⚠️ THE SHADER COMES FIRST, AND IT WAS REPORTED BY A PANEL THAT NO
+       * LONGER EXISTS (2026-09-27, Marc: "i can not find where i can shift the
+       * shaders … i think they should be in the left menu in the display tab").
+       *
+       * They ARE in the left menu, in Display — the grid moved there on
+       * 2026-08-20 — but this badge never learned to say so. The reading lived
+       * in `case "read"`, and move() DELETES that panel from the left column
+       * once its body is docked on the right. So Display sat closed, announcing
+       * only "contours", with seventeen shaders behind it and nothing on the
+       * summary to suggest they were there.
+       *
+       * ⚠️ THE SAME LESSON AS THE FOLD ABOVE, WHICH LOST ITS `open` IN THE SAME
+       * MOVE: when something moves, whatever was true OF it has to move too.
+       * Twice in one relocation, and neither failure raised an error — the
+       * feature simply became unfindable, which is not a state anything tests.
+       *
+       * This is also what lets the menu stay COLLAPSED and still be findable.
+       * Every panel and every sub starts shut (Marc, 2026-09-02), so the closed
+       * summary itself has to carry the news. Read from the DOM the user sees,
+       * like every other badge in this file, so it cannot disagree with the grid.
+       */
+      const shader = document.querySelector("#panels .raster.active span");
+      if (shader) parts.push(shader.textContent.trim());
       if (on("r-voxel")) parts.push("voxels");
       if (on("t-plants")) parts.push("vegetation");
       if (on("t-context")) parts.push("context");
       if (on("t-contours")) parts.push("contours");
       if (on("t-hud")) parts.push("instrument");
       break;
+    }
     default:
       break;
   }

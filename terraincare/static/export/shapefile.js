@@ -14,6 +14,17 @@
  */
 
 const SHP_POLYGON = 5;
+/**
+ * ⚠️ A POLYLINE RECORD IS BYTE-IDENTICAL TO A POLYGON RECORD, and only the type
+ * code differs: same bounding box, same part count, same part index, same
+ * points. What differs is the CONTRACT — a polygon's parts are closed rings
+ * whose winding states which is the outer and which are holes, and a polyline's
+ * parts are open runs with no winding rule at all. So the writer shares the
+ * record layout and must NOT share `normaliseRing`: closing a channel reach
+ * would join its mouth back to its head, and rewinding it would reverse the
+ * direction the water runs.
+ */
+const SHP_POLYLINE = 3;
 
 /** ⚠️ TRAP 1: LENGTHS IN A SHAPEFILE HEADER ARE 16-BIT WORDS, NOT BYTES. */
 const words = (bytes) => bytes / 2;
@@ -27,11 +38,11 @@ const words = (bytes) => bytes / 2;
  * @param {number} byteLength
  * @param {number[]} bbox  [xmin, ymin, xmax, ymax]
  */
-function header(v, byteLength, bbox) {
+function header(v, byteLength, bbox, shapeType = SHP_POLYGON) {
   v.setInt32(0, 9994, false);              // file code, big-endian
   v.setInt32(24, words(byteLength), false); // file length in WORDS, big-endian
   v.setInt32(28, 1000, true);              // version, little-endian
-  v.setInt32(32, SHP_POLYGON, true);       // shape type, little-endian
+  v.setInt32(32, shapeType, true);         // shape type, little-endian
   v.setFloat64(36, bbox[0], true);
   v.setFloat64(44, bbox[1], true);
   v.setFloat64(52, bbox[2], true);
@@ -76,16 +87,19 @@ function normaliseRing(ring, wantClockwise = true) {
  */
 
 /**
- * @param {PolygonFeature[]} features
+ * @param {PolygonFeature[]} features  for `type: "polyline"` the `rings` are
+ *   PARTS: open runs, left exactly as given — neither closed nor rewound.
  * @param {{fields?: {name: string, type: "C"|"N", size: number, decimals?: number}[],
- *          wkt?: string}} [opts]
+ *          wkt?: string, type?: "polygon"|"polyline"}} [opts]
  * @returns {{shp: Uint8Array, shx: Uint8Array, dbf: Uint8Array, prj: string}}
  */
 export function writeShapefile(features, opts = {}) {
   const fields = opts.fields ?? [{ name: "id", type: "N", size: 10 }];
+  const line = opts.type === "polyline";
+  const shapeType = line ? SHP_POLYLINE : SHP_POLYGON;
 
   const prepared = features.map((f) => {
-    const rings = f.rings.map((r, i) => normaliseRing(r, i === 0));
+    const rings = line ? f.rings : f.rings.map((r, i) => normaliseRing(r, i === 0));
     const pts = rings.reduce((n, r) => n + r.length, 0);
     // 44 fixed bytes + parts index + the points themselves.
     const content = 44 + rings.length * 4 + pts * 16;
@@ -106,8 +120,8 @@ export function writeShapefile(features, opts = {}) {
   }
   if (!prepared.length) { xmin = ymin = xmax = ymax = 0; }
   const bbox = [xmin, ymin, xmax, ymax];
-  header(sv, shpLen, bbox);
-  header(xv, shxLen, bbox);
+  header(sv, shpLen, bbox, shapeType);
+  header(xv, shxLen, bbox, shapeType);
 
   let off = 100;
   prepared.forEach((p, i) => {
@@ -115,7 +129,7 @@ export function writeShapefile(features, opts = {}) {
     sv.setInt32(off, i + 1, false);
     sv.setInt32(off + 4, words(p.content), false);
     let o = off + 8;
-    sv.setInt32(o, SHP_POLYGON, true); o += 4;
+    sv.setInt32(o, shapeType, true); o += 4;
     let rxmin = Infinity, rymin = Infinity, rxmax = -Infinity, rymax = -Infinity;
     for (const r of p.rings) for (const [x, y] of r) {
       if (x < rxmin) rxmin = x; if (x > rxmax) rxmax = x;
@@ -215,7 +229,12 @@ function writeDBF(features, fields) {
  * 7946 says an unstated CRS is WGS 84 and inventing a different one in the file
  * is worse than leaving the caller to say what they mean.
  */
-export function writeGeoJSON(features, { crs = null } = {}) {
+export function writeGeoJSON(features, { crs = null, type = "Polygon" } = {}) {
+  // ⚠️ A LineString IS NOT A DEGENERATE POLYGON. Its coordinates are a flat
+  // array of positions rather than an array of rings, it is never closed, and
+  // it has no winding to normalise — reversing a channel reach would reverse
+  // the direction the water runs. Hence the branch rather than a shared path.
+  const line = type === "LineString";
   return JSON.stringify({
     type: "FeatureCollection",
     // ⚠️ GeoJSON WANTS COUNTER-CLOCKWISE OUTER RINGS — the opposite of the
@@ -223,10 +242,9 @@ export function writeGeoJSON(features, { crs = null } = {}) {
     features: features.map((f) => ({
       type: "Feature",
       properties: f.attributes ?? {},
-      geometry: {
-        type: "Polygon",
-        coordinates: f.rings.map((r, i) => normaliseRing(r, i !== 0)),
-      },
+      geometry: line
+        ? { type: "LineString", coordinates: f.rings[0] }
+        : { type: "Polygon", coordinates: f.rings.map((r, i) => normaliseRing(r, i !== 0)) },
     })),
     // ⚠️ THE MEMBER IS OMITTED ENTIRELY WHEN THE CRS IS UNKNOWN, rather than
     // written with a placeholder. `crs.replace` on null would also have thrown.

@@ -1229,7 +1229,7 @@
          contents are folded away has no visible subject. Terrain is Import's
          one REQUIRED input, so it is the subject; the other three are optional
          and stay collapsed. -->
-    <details class="sub" id="sec-terrain" open>
+    <details class="sub" id="sec-terrain">
       <summary class="subhead">Terrain</summary>
       <div class="sec-body">
     <div class="row">
@@ -1836,6 +1836,83 @@
       </div>
     </details>
 
+    <!-- ⚠️ THE SAME GEOMETRY THE OTHER TOOLS ALREADY DRAW. An attractor needs no
+         drawing tool of its own: the Curve above traces a line and Select draws a
+         region, and this reads whichever one you point it at. Points are the one
+         GIS geometry with no tool yet — the kernel takes them, the interface
+         cannot yet make them. -->
+    <details class="sub" id="sec-attract">
+      <summary class="subhead">Attractor</summary>
+      <div class="sec-body">
+      <div class="meta keys" id="attract-empty">
+        <b>1.</b> Press <b>Points</b> below and click to place them —
+        <b>drag one to move it</b>, and it keeps the height it was placed at —
+        or trace a
+        <b>Curve</b> above, or draw and select a shape in <b>Select</b>. The
+        attractor works on whichever you choose.<br>
+        <b>2.</b> Set the height the geometry holds — <b>level</b>, a
+        <b>gradient</b>, or <b>follow</b> the ground it was drawn on. An
+        attractor that sits exactly on the ground has nothing to pull to.<br>
+        <b>3.</b> <b>Pull</b> is the whole gesture: <b>+1</b> brings the ground
+        onto the geometry, <b>0</b> does nothing, <b>−1</b> pushes it the same
+        distance the other way.<br>
+        <b>4.</b> <b>Reach</b> is how far the influence carries, and
+        <b>falloff</b> is how it fades. The sentence below prices it before
+        anything moves.
+      </div>
+      <div id="attract-tools" hidden>
+        <!-- ⚠️ THE ONLY GEOMETRY THAT NEEDED A TOOL OF ITS OWN. Curves come from
+             Curve above and shapes from Select; a point had nowhere to be drawn,
+             so it is drawn here, beside the one thing that consumes it. -->
+        <div class="row" id="attract-point-row">
+          <button class="ptool" id="pt-points" data-ptool="points"
+            title="place points for the ground to be pulled toward">Points</button>
+          <button id="attract-points-clear" class="link">clear the points</button>
+        </div>
+        <label class="field">
+          <span>Geometry</span>
+          <select id="attract-source"></select>
+        </label>
+        <!-- Marc's slider, stated as he stated it. -->
+        <label class="field">
+          <span>Pull <em id="attract-t-val">0.00</em></span>
+          <input type="range" id="attract-strength" min="-1" max="1" step="0.05" value="0">
+        </label>
+        <label class="field">
+          <span>Reach <em id="attract-r-val">6.0 m</em></span>
+          <input type="range" id="attract-radius" min="0.5" max="40" step="0.5" value="6">
+        </label>
+        <label class="field">
+          <span>Falloff</span>
+          <select id="attract-falloff"></select>
+        </label>
+        <label class="field" id="attract-along-field">
+          <span>The curve holds</span>
+          <select id="attract-along"></select>
+        </label>
+        <div class="meta" id="attract-along-note"></div>
+        <label class="field" id="attract-grad-field">
+          <span>Gradient <em id="attract-g-val">1.0%</em></span>
+          <input type="range" id="attract-grad" min="-10" max="10" step="0.1" value="1">
+        </label>
+        <label class="field">
+          <span>Height offset <em id="attract-o-val">0.00 m</em></span>
+          <input type="range" id="attract-offset" min="-10" max="10" step="0.05" value="0">
+        </label>
+        <div class="row">
+          <button id="attract-apply"><b>Pull the ground</b></button>
+        </div>
+        <div class="teaching" id="attract-preview"></div>
+      </div>
+      <div class="meta">
+        ⚠️ A repeller is not an undo. Pulling and then pushing by the same amount
+        does not restore the ground, because the second pass mirrors the
+        distance it finds after the first. <b>Ctrl+Z</b> is what reverses a
+        gesture; this slider is a gesture of its own.
+      </div>
+      </div>
+    </details>
+
     <details class="sub" id="sec-stamp">
       <summary class="subhead" id="shape-pattern-subhead">Pattern</summary>
       <div class="sec-body">
@@ -2262,8 +2339,8 @@
          prevent. A distortion nobody declares is worse than a distortion nobody
          can adjust. -->
     <label class="field" id="view-ex-field" hidden>
-      <span>Vertical exaggeration <em id="ex-val">1.0×</em></span>
-      <input type="range" id="ex" min="1" max="8" step="0.5" value="1">
+      <span>Vertical exaggeration <em id="ex-val">2.0×</em></span>
+      <input type="range" id="ex" min="1" max="8" step="0.5" value="2">
     </label>
 
     <!-- ⚠️ ONE SUB PER REPRESENTATION (2026-08-16, Marc), each holding that
@@ -2298,6 +2375,33 @@
         <input type="range" id="contour" min="0" max="9" step="1" value="4">
       </label>
       <div class="meta" id="contour-note" hidden></div>
+
+      <!-- ⚠️ THE FACTOR IS DECLARED EVEN THOUGH THE SLIDER IS NOT SHOWN
+           (2026-09-02). The 1.0 pin was lifted to 2.0 at Marc's request; the
+           note that set that pin objected to an UNDECLARED distortion, not to a
+           distortion, so the declaration is the condition on which it is lifted.
+           Filled by syncExaggerationNote(). -->
+      <div class="meta" id="ex-note" hidden></div>
+
+      <!-- ══ RELIEF SHADING ════════════════════════════════════════════════
+           ⚠️ THE PLUMBING PREDATES THE CONTROL (2026-09-02, Marc: "a relief
+           shading strength slider is also good to have"). `Surface.aoStrength`
+           has existed since the occlusion pass was written and has never had a
+           control — it was a constructor option nobody could reach.
+           ⚠️ AND IT IS A DISPLAY CONTROL, NOT AN ANALYSIS ONE. It changes how
+           the ground is drawn and touches no measurement: the sky-view grid it
+           reads is unchanged, and Sky view factor stays available as its own
+           analysis layer for anyone who wants the number rather than the
+           shading. -->
+      <label class="field" id="ao-field">
+        <span>Relief shading <em id="ao-val">50%</em></span>
+        <input type="range" id="ao-strength" min="0" max="100" step="5" value="50">
+      </label>
+      <div class="meta">
+        How deeply occlusion darkens hollows. It shades the drawing only —
+        every analysis layer is multiplied by this same term, so pushing it
+        high drags the readings dark with it.
+      </div>
       </div>
     </details>
 
@@ -2380,17 +2484,39 @@
       </div>
     </details>
 
-    <!-- ⚠️ CONTEXT SITS BELOW BOTH SUBS AND STAYS AT TOP LEVEL (2026-08-16,
-         Marc). It is not a property of either representation — it is a second,
-         coarser DEM drawn around whichever one is live — so it is a peer of the
-         choice above, not a member of it. It is also used often enough that
-         burying it in a fold would cost more than the tidiness is worth.
+    <!-- ⚠️⚠️ CONTEXT IS NOW ITS OWN SUB (2026-09-02, Marc: "the context can be
+         an own submenu"), REVERSING A DECISION HE MADE ON 2026-08-16 that is
+         kept here rather than deleted, because it is still the better argument
+         against and whoever reads this next should see both:
+
+           "CONTEXT SITS BELOW BOTH SUBS AND STAYS AT TOP LEVEL. It is not a
+            property of either representation — it is a second, coarser DEM
+            drawn around whichever one is live — so it is a peer of the choice
+            above, not a member of it. It is also used often enough that burying
+            it in a fold would cost more than the tidiness is worth."
+
+         Two things changed since. The block GREW — it now carries the drop
+         target, the nest note, and the "What drains in" reading with its own
+         paragraph of provenance — so at top level it was the longest run of
+         loose controls in the panel. And every other thing in Display is behind
+         a subhead, so the one that was not read as unfinished rather than as
+         emphasised. The peer argument is answered by the sub sitting LAST,
+         after the three representation folds, rather than inside one of them.
          ⚠️ THE DROP TARGET CAME HERE FROM IMPORT, so the backdrop arrives in
          the same place the switch that reveals it lives. -->
+    <details class="sub" id="sec-view-context">
+      <summary class="subhead">Context</summary>
+      <div class="sec-body">
     <div class="row">
       <button class="tog" id="t-context" title="show the 4 m national tile this patch sits inside">Context 4 m</button>
+      <!-- ⚠️ THE CONTEXT AS AN INPUT, not only a backdrop (2026-09-02, Marc:
+           "for now the context does not serve any other purpose than giving a
+           visual reference"). This is the first control that READS it. -->
+      <button class="tog" id="t-inflow" hidden
+        title="which ground outside the patch drains into it, and where it crosses">What drains in</button>
     </div>
     <div class="meta" id="context-note"></div>
+    <div class="meta" id="inflow-note" hidden></div>
     <div id="dropzone-context">
       <div class="dz" id="dz-context">
         <strong>Drop a context</strong>
@@ -2399,6 +2525,8 @@
       <span class="or">single-band float32 DEM, any CRS · or click to choose a file</span>
     </div>
     <input type="file" id="file-context" accept=".tif,.tiff" hidden>
+      </div>
+    </details>
 
     <div class="meta keys">
       <b>left-drag</b> paint · <b>middle-drag</b> orbit · <b>right-drag</b> pan<br>
@@ -2473,12 +2601,24 @@
       <button id="drainage-export">Drainage plan · SVG</button>
       <button id="chainage-export">Chainage sections · SVG</button>
     </div>
+    <!-- The same drainage, as data rather than as a drawing. -->
+    <div class="row">
+      <button id="drainage-vector-export"><b>Channels + catchments · DXF + SHP</b></button>
+    </div>
     <div class="meta">
       Isopach: equal depth of cut (dashed) and fill (solid), the limit of
       works heavy. Slope classes: gradient bands as ratios, denser hatch is
       steeper. Drainage: channels, divides, standing water and ranked
       outfalls at a stated event. Chainage sections: cross-sections at even
       stations along the guide, looking along it, areas per section.
+    </div>
+    <div class="meta">
+      <b>Channels + catchments</b> is the drainage as VECTOR DATA, not as a
+      sheet: channel reaches as connected polylines carrying their contributing
+      area, length and class, and catchments as polygons carrying their area and
+      cell count. DXF (R12, layers by class) for CAD and SHP + GeoJSON for GIS,
+      in one ZIP with a README. Steepest-descent paths over the bare surface —
+      no infiltration, roughness, culverts or rainfall event.
     </div>
 
     <div class="row">

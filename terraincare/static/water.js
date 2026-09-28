@@ -25,6 +25,81 @@
 // uneven ground is visibly shallower where the ground is higher.
 
 import * as THREE from "three";
+import { sample } from "./analysis/ramps.js";
+
+/**
+ * DEPTH → COLOUR, on the depressions ramp.
+ *
+ * Marc, 2026-09-02: "all voxels of the rainfall look the same — could we have a
+ * gradual coloring, so that if there is more water accumulated … they get a
+ * darker blue than where there is only a few. You could use the colour palette
+ * of the depressions analysis layer."
+ *
+ * ⚠️⚠️ LOGARITHMIC, AND MEASURING IS WHAT SAID SO. Ponded depth on the POI
+ * patch at the default 2 mm event runs 1 mm to 355 mm, median 16 mm, p90
+ * 109 mm — two and a half decades, heavily skewed to the shallow end. On the
+ * depression ramp's own linear [0, 0.5] m domain the median lands at t = 0.03
+ * and ninety-nine hundredths of the water comes out the same pale blue, which
+ * is the complaint this exists to answer, moved rather than fixed. `log10` is
+ * already this project's convention for a quantity that spans decades — see
+ * the catchment-area readout.
+ *
+ * ⚠️ THE DOMAIN IS FIXED, NOT STRETCHED TO THE FRAME. A percentile stretch per
+ * rebuild would recolour the same pond every time the rainfall slider moved, so
+ * a deeper event could render PALER than a shallow one — the per-state stretch
+ * trap §5.3 records, in the one layer where the user is explicitly comparing
+ * events. 2 mm to 500 mm, stated, and the same at every setting.
+ *
+ * ⚠️ AND IT STARTS AT THE RAMP'S PALE BLUE, NOT ITS NEUTRAL. The depression
+ * ramp opens on paper white so that "not a depression" reads as absent; water
+ * one millimetre deep is not absent, and a paper-white puddle would look like
+ * a hole in the terrain. The walk begins at the first blue stop.
+ */
+function setInstanceColour(mesh, i, depth) {
+  const c = mesh.instanceColor;
+  if (!c) return;
+  const [r, g, b] = depthColour(depth);
+  c.array[i * 3] = r; c.array[i * 3 + 1] = g; c.array[i * 3 + 2] = b;
+}
+
+const DEPTH_LO = 0.002, DEPTH_HI = 0.5;
+/**
+ * The stretch of the depression ramp the water actually walks.
+ *
+ * ⚠️ BOTH ENDS ARE NAMED STOPS OF THE PALETTE, not fractions chosen by eye.
+ * 0.12 is its first blue [176, 226, 232]; 0.70 is its deep blue [22, 92, 172].
+ *
+ * ⚠️ THE FLOOR EXISTS BECAUSE THE RAMP OPENS ON PAPER WHITE, so that "not a
+ * depression" reads as absent. Water one millimetre deep is not absent, and a
+ * paper-white puddle would look like a hole in the terrain.
+ *
+ * ⚠️⚠️ AND THE CEILING EXISTS BECAUSE THE RAMP ENDS ON NAVY [10, 30, 96]
+ * (2026-09-02, Marc: "cap the dark end so deep water stays blue"). That stop
+ * is right for a depression MAP, where the darkest cells are a handful of deep
+ * basins on pale paper. Standing water is drawn over painted terrain at 62%
+ * opacity and lit, so the same navy arrives as a near-black blob and the deep
+ * end stops reading as water at all. Stopping at the deep-blue stop keeps the
+ * whole range recognisably blue.
+ */
+const RAMP_FLOOR = 0.12, RAMP_CEIL = 0.70;
+
+/** sRGB byte → linear, for an instance colour. See the note in surface.js. */
+const toLinear = (b) => {
+  const c = b / 255;
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+};
+
+/**
+ * @param {number} depth metres
+ * @returns {number[]} linear r, g, b
+ */
+function depthColour(depth) {
+  const lo = Math.log10(DEPTH_LO), hi = Math.log10(DEPTH_HI);
+  const t = Math.max(0, Math.min(1,
+    (Math.log10(Math.max(depth, DEPTH_LO)) - lo) / (hi - lo)));
+  const rgba = sample("depression", RAMP_FLOOR + (RAMP_CEIL - RAMP_FLOOR) * t, [0, 1]);
+  return [toLinear(rgba[0]), toLinear(rgba[1]), toLinear(rgba[2])];
+}
 
 const _m = new THREE.Matrix4();
 
@@ -56,12 +131,45 @@ export class WaterField {
     // translation at the ground, which is what keeps the maths here readable
     // and matches how voxels.js writes its own matrices.
     geo.translate(0, 0, 0.5);
+    /**
+     * ⚠️⚠️ A WHITE `color` ATTRIBUTE, AND WITHOUT IT EVERY BOX RENDERS BLACK
+     * (2026-09-02, Marc: "the rain looks very dark … all uniformly dark").
+     *
+     * `vertexColors: true` defines USE_COLOR, and three.js's color_vertex chunk
+     * then runs `vColor *= color` BEFORE `vColor *= instanceColor`. A geometry
+     * with no `color` attribute supplies (0, 0, 0) for it — a missing vertex
+     * attribute reads as zero in WebGL — so the per-instance colour was being
+     * multiplied into a zero and every box came out black, identically,
+     * whatever depth it stood for.
+     *
+     * ⚠️ AND THE FLAG CANNOT SIMPLY BE DROPPED. USE_INSTANCING_COLOR declares
+     * the varying but the FRAGMENT shader only applies it under USE_COLOR
+     * (`diffuseColor.rgb *= vColor`), so without `vertexColors` the instance
+     * colour is computed and then never used. Both are needed: the flag to
+     * reach the fragment, and this attribute so the multiply is by one.
+     *
+     * ⚠️ THE LESSON, RECORDED BECAUSE IT WAS EXPENSIVE: the instance-colour
+     * buffer was measured and found correct — 375 distinct colours, depth vs
+     * luminance Spearman -0.9999 — and that was reported as verified. It proved
+     * the DATA, not the PICTURE. A buffer that never reaches the screen passes
+     * every test made of the buffer.
+     */
+    geo.setAttribute("color", new THREE.BufferAttribute(
+      new Float32Array(geo.attributes.position.count * 3).fill(1), 3));
     this.material = new THREE.MeshLambertMaterial({
       // Water is the one thing in this interface allowed a hue that is not an
       // analysis ramp, because it is not a reading of the ground — it is a
       // substance standing on it. It stays close to the wet end of the TWI ramp
       // so the two agree by eye: where the wetness map is blue, water collects.
-      color: 0x2f6f9f,
+      // ⚠️ WHITE, BECAUSE THE COLOUR NOW ARRIVES PER INSTANCE. The material's
+      // own colour MULTIPLIES the instance colour, so leaving the old flat blue
+      // here would tint the whole ramp blue on top of itself and flatten the
+      // very gradient this change adds.
+      color: 0xffffff,
+      // Required for `instanceColor` to reach the fragment: three.js declares
+      // the varying under USE_INSTANCING_COLOR but only multiplies it into
+      // `diffuseColor` under USE_COLOR, which is what this flag sets.
+      vertexColors: true,
       transparent: true,
       // Translucent enough to see the terrain through a deep pond, opaque
       // enough that a 2 cm film still registers against pale ground.
@@ -99,6 +207,11 @@ export class WaterField {
     }
     this.mesh = new THREE.InstancedMesh(this.geo, this.material, capacity);
     this.mesh.frustumCulled = false;
+    // ⚠️ ALLOCATED WITH THE MESH, not lazily on the first setColorAt. An
+    // InstancedMesh sizes its colour buffer once, exactly as it does its matrix
+    // buffer, and a grown pond gets a new mesh either way.
+    this.mesh.instanceColor =
+      new THREE.InstancedBufferAttribute(new Float32Array(capacity * 3), 3);
     this.mesh.count = 0;
     this._capacity = capacity;
     if (this.group) this.group.add(this.mesh);
@@ -284,11 +397,21 @@ export class WaterField {
           northY - (r + 0.5) * cell,
           zg * ex,
         );
+        // ⚠️ THE TRUE DEPTH, NOT THE DRAWN HEIGHT. They are the same here and
+        // differ in the block path, where the box is stretched to meet a
+        // quantised top — colouring by the drawn height there would report the
+        // rounding of the terrain as a depth of water.
+        setInstanceColour(mesh, n, d);
         mesh.setMatrixAt(n++, _m);
       }
     }
     mesh.count = n;
     mesh.instanceMatrix.needsUpdate = true;
+    // ⚠️ THE COLOUR BUFFER NEEDS ITS OWN FLAG. Uploading the matrices alone
+    // leaves every box carrying the PREVIOUS rebuild colours — which on a
+    // rainfall slider drag is the old depths painted on the new water, and it
+    // would have looked like the gradient simply lagging.
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     mesh.computeBoundingSphere();
     this.count = n;
   }
@@ -331,7 +454,7 @@ export class WaterField {
         // and a negative-height box is a degenerate instance.
         const h = Math.max(a.top, base + a.depth) - base;
         if (!(h > MIN_DRAW)) continue;
-        cells.push([br, bc, base, h]);
+        cells.push([br, bc, base, h, a.depth]);
       }
     }
 
@@ -340,17 +463,19 @@ export class WaterField {
     if (!mesh) return;
     const northY = nrows * cell;
     let n = 0;
-    for (const [br, bc, base, h] of cells) {
+    for (const [br, bc, base, h, depth] of cells) {
       _m.makeScale(w, w, h * ex);
       _m.setPosition(
         (bc * k + k / 2) * cell,
         northY - (br * k + k / 2) * cell,
         base * ex,
       );
+      setInstanceColour(mesh, n, depth);
       mesh.setMatrixAt(n++, _m);
     }
     mesh.count = n;
     mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     mesh.computeBoundingSphere();
     this.count = n;
   }

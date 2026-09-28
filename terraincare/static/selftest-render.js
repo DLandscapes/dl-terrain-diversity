@@ -27,6 +27,9 @@ import { DEM } from "./dem.js";
 import { loadGeoTIFF } from "./geotiff.js";
 import { Surface } from "./surface.js";
 import { VoxelField } from "./voxels.js";
+import { SectionOverlay } from "./section-view.js";
+import { sampleSection } from "./section.js";
+import { blockLevels } from "./export/solid.js";
 import { GlyphField } from "./glyph-view.js";
 import { WaterField } from "./water.js";
 import { pondWater } from "./analysis/ponding.js";
@@ -359,6 +362,98 @@ export async function runRenderSuite(fetchTile, canvas, overlay) {
   // cell draws NOTHING rather than a small block, and the TOP of every block
   // stays where the solid field put it — because size may not quietly move the
   // ground surface.
+  // ── R3d · the cut line and the representation it is drawn over ──────────
+  //
+  // Marc, 2026-09-27: "when i switch to the voxel view the section lines of the
+  // original terrain should perhaps also be in a polytonalized manner with 90
+  // degree angles". A smooth section over a voxel surface has the drawing and
+  // the model disagreeing about what the ground is.
+  //
+  // ⚠️ THE PROPERTY IS EXACT, SO IT IS ASSERTED RATHER THAN EYEBALLED. From
+  // directly above a staircase in Z is INVISIBLE — the risers are vertical, so
+  // the plan geometry does not change at all — and in elevation the line is one
+  // pixel wide behind two panels. Both make a screenshot a poor witness.
+  {
+    const R3D = "R3d · the cut line steps with the blocks, or curves with the surface";
+    const k = 4;
+    const vox = new VoxelField(dem, { verticalExaggeration: 1, blockCells: k });
+    const baseZ = vox.baseZ, q = vox.voxelHeight;
+    const { levels, bCols } = blockLevels(dem, k, baseZ, q);
+    const northY = dem.originY + dem.nrows * dem.cell;
+    const stepZ = (x, y) => {
+      const c = Math.floor((x - dem.originX) / dem.cell);
+      const r = Math.floor((northY - y) / dem.cell);
+      if (r < 0 || c < 0 || r >= dem.nrows || c >= dem.ncols) return NaN;
+      const lv = levels[Math.floor(r / k) * bCols + Math.floor(c / k)];
+      return lv < 0 ? NaN : baseZ + lv * q;
+    };
+    const prof = sampleSection(dem,
+      [dem.originX + 3, dem.originY + 9], [dem.originX + 29, dem.originY + 23]);
+    const secs = [{ name: "A", profile: prof }];
+
+    /** The proposed-ground line's vertices, read off the geometry it drew. */
+    const nowLine = (opts) => {
+      const ov = new SectionOverlay(dem, { verticalExaggeration: 1 });
+      ov.setSections(secs, opts);
+      let pos = null;
+      ov.group.traverse((o) => {
+        if (o.type === "Line" && /** @type {any} */ (o).material === ov._now) {
+          pos = /** @type {any} */ (o).geometry.getAttribute("position");
+        }
+      });
+      return pos;
+    };
+
+    /** Segments that change BOTH plan position and height — the sloped ones. */
+    const sloped = (pos) => {
+      let n = 0, runs = 0, risers = 0;
+      for (let i = 1; i < pos.count; i++) {
+        const dx = pos.getX(i) - pos.getX(i - 1);
+        const dy = pos.getY(i) - pos.getY(i - 1);
+        const dz = pos.getZ(i) - pos.getZ(i - 1);
+        const moved = Math.hypot(dx, dy) > 1e-6, rose = Math.abs(dz) > 1e-6;
+        if (moved && rose) n++;
+        else if (moved) runs++;
+        else if (rose) risers++;
+      }
+      return { n, runs, risers };
+    };
+
+    const stepped = nowLine({ stepZ });
+    const smooth = nowLine({});
+    if (stepped && smooth) {
+      const st = sloped(stepped);
+      add(R3D, "over blocks, every segment of the cut line is either a level run "
+        + "or a vertical riser — never both, which is what makes the corner 90° "
+        + "rather than merely steep",
+        "0 sloped segments",
+        `${st.n} sloped · ${st.runs} runs · ${st.risers} risers`,
+        st.n === 0 && st.runs > 0 && st.risers > 0);
+
+      let offLattice = 0;
+      for (let i = 0; i < stepped.count; i++) {
+        const t = (stepped.getZ(i) - baseZ) / q;
+        if (Math.abs(t - Math.round(t)) > 1e-4) offLattice++;
+      }
+      add(R3D, "…and every height on it sits on the voxel lattice, so the line "
+        + "cannot run through the top of a cube it is supposed to cut",
+        "0 off-lattice vertices", `${offLattice} of ${stepped.count}`,
+        offLattice === 0);
+
+      // ⚠️ THE CONTROL. Without it a check that simply never found a sloped
+      // segment — because the line was empty, or because stepping had been
+      // switched on for everything — would pass for the wrong reason.
+      add(R3D, "…while over the smooth surface the SAME cut still follows the "
+        + "ground, so the stepping belongs to the representation and not to the "
+        + "section", "sloped segments present",
+        `${sloped(smooth).n} sloped`, sloped(smooth).n > 0);
+    } else {
+      add(R3D, "the cut line draws at all, stepped and smooth", "two lines",
+        `stepped ${stepped ? "yes" : "no"}, smooth ${smooth ? "yes" : "no"}`, false);
+    }
+    vox.dispose?.();
+  }
+
   const R3B = "R3b · blocks sized by an analysis layer — a second channel, not a second guess";
   {
     const k = 8;
@@ -1014,19 +1109,38 @@ export async function runRenderSuite(fetchTile, canvas, overlay) {
     }
 
     {
-      // Drawn over the terrain rather than into it: a depth tie at every pixel
-      // is the shimmer this project already fixed once on the wireframe.
+      /**
+       * ⚠️⚠️ THIS ROW ASSERTED THE OPPOSITE UNTIL 2026-09-27, and the reason it
+       * changed is worth more than the row. It demanded depthTest OFF on every
+       * overlay material, because "a ring lying exactly in the surface" ties
+       * with it per fragment and shimmers — the defect this project already
+       * fixed once on the wireframe.
+       *
+       * The premise stopped being true. `_drape` lifts every overlay vertex by
+       * LIFT (0.02 m), so no ring lies EXACTLY in the surface any more; and with
+       * depth testing off, a ring behind a ridge drew straight through it. Marc
+       * reported exactly that: "some lines that should be occluded by the mesh
+       * in front of them are visible and make the reading more difficult".
+       *
+       * So the promise is now the other one, and it is still a promise worth a
+       * row: the overlay is OCCLUDED by ground in front of it, and it stays out
+       * of the depth buffer so the overlays cannot occlude each other. The
+       * shimmer is held off by the lift instead of by the flag. Turning depth
+       * testing back off would pass the old row and fail this one, which is the
+       * point of writing it this way round rather than deleting it.
+       */
       let all = true, n = 0;
       overlay.group.traverse((o) => {
         const m = /** @type {any} */ (o).material;
         if (!m) return;
         n++;
-        if (m.depthTest !== false || m.depthWrite !== false) all = false;
+        if (m.depthTest !== true || m.depthWrite !== false) all = false;
       });
-      add(R5, "…and every overlay material has depth testing OFF, so a ring lying " +
-        "exactly in the surface cannot tie with it per fragment and shimmer",
-        `${n} materials, all depthTest off`, all ? `${n} of ${n}` : "at least one on",
-        n > 0 && all);
+      add(R5, "…and every overlay material is depth-TESTED but never depth-WRITTEN, "
+        + "so ground in front of a ring hides it while the overlays stay clear of "
+        + "each other — the lift, not the flag, is what stops it shimmering",
+        `${n} materials, all tested and none written`,
+        all ? `${n} of ${n}` : "at least one wrong", n > 0 && all);
     }
 
     {

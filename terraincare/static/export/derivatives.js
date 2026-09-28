@@ -175,7 +175,7 @@ function runsToPath(runs, X, Y, cls, extra = "") {
   return `<path class="${cls}"${extra} d="${d}"/>`;
 }
 
-const PROVENANCE = "DL-TerrainDiversity · a terrain analysis instrument. Not a prediction.";
+export const PROVENANCE = "DL-TerrainDiversity · a terrain analysis instrument. Not a prediction.";
 
 /* ─────────────────────────────── the isopach ────────────────────────────── */
 
@@ -570,7 +570,11 @@ export function chainageSectionsSVG(dem, guidePts, opts = {}) {
   const ex = Math.min(4, Math.max(1, (width / relief) / 5));
   const bandH = relief * mmPerM * ex + 8;
   const TITLE = 26;
-  const SHEET_H = PAD + TITLE + secs.length * (bandH + 7) + 26 + PAD;
+  // ⚠️ 18 mm FOR THE SCALE BAR. This sheet printed "1:20 across" and drew
+  // nothing to measure it with, so the statement could not be checked against
+  // the paper at any reproduction size.
+  const BAR_ROOM = 18;
+  const SHEET_H = PAD + TITLE + secs.length * (bandH + 7) + 26 + BAR_ROOM + PAD;
 
   const vScale = niceScale((width / bandW) * 1000 / ex);
   const hScale = niceScale((width / bandW) * 1000);
@@ -624,6 +628,28 @@ export function chainageSectionsSVG(dem, guidePts, opts = {}) {
         + `y="${(top + bandH / 2 + 3).toFixed(2)}">fill ${sec.areas.fill.toFixed(1)} m²</text>`);
     }
   });
+
+  // ── the scale bar ──────────────────────────────────────────────────────
+  // Across the section band, so it measures the axis the sections are drawn on.
+  {
+    let barM = 0;
+    for (const v of [1, 2, 5, 10, 20, 50, 100]) if (2 * v <= width) barM = v;
+    if (barM > 0) {
+      const bw = barM * mmPerM, sy = SHEET_H - 26, bx = PAD;
+      for (let i = 0; i < 4; i++) {
+        parts.push(`<rect class="bar" fill="${i % 2 ? "#1c1a16" : "none"}" `
+          + `x="${(bx + i * bw / 2).toFixed(2)}" y="${sy.toFixed(2)}" `
+          + `width="${(bw / 2).toFixed(2)}" height="2.2"/>`);
+      }
+      for (let i = 0; i <= 2; i++) {
+        parts.push(`<text class="axl" x="${(bx + i * bw).toFixed(2)}" `
+          + `y="${(sy + 6).toFixed(2)}" text-anchor="middle">`
+          + `${(i * barM).toFixed(0)}</text>`);
+      }
+      parts.push(`<text class="axl" x="${(bx + 2 * bw + 3).toFixed(2)}" `
+        + `y="${(sy + 6).toFixed(2)}">metres across the section</text>`);
+    }
+  }
 
   parts.push(`<text class="sub" x="${PAD}" y="${(SHEET_H - 8).toFixed(1)}">`
     + `Areas on each section, never volumes — a volume is area × spacing, and `

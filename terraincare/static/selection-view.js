@@ -69,9 +69,18 @@ export class SelectionOverlay {
     this.group.scale.set(1, 1, opts.verticalExaggeration ?? 1);
     this.group.renderOrder = 14;   // above the plan rings and the sections
     this.group.visible = false;
+    // ⚠️⚠️ DEPTH-TESTED, UNLIKE EVERY OTHER OVERLAY IN THIS APP (Marc,
+    // 2026-09-27: "some lines that should be occluded by the mesh in front of
+    // them are visible and make the reading more difficult"). The house default
+    // is depthTest off, and for a PLAN overlay that is right — looking straight
+    // down nothing can occlude anything, and the flag only guarantees the line
+    // draws. A selection is read in the tilted view too, and there a boundary
+    // showing through the ridge in front of it stops being a boundary and
+    // becomes noise. The lift in `cornerZ` is what keeps it from sinking INTO
+    // the ground now that the depth buffer is consulted.
     this._mat = new THREE.LineBasicMaterial({
       color: INK, transparent: true, opacity: 0.95,
-      depthTest: false, depthWrite: false, fog: false,
+      depthTest: true, depthWrite: false, fog: false,
     });
     // ⚠️ A SECOND, QUIETER MATERIAL FOR THE INTERIOR LATTICE (Marc,
     // 2026-08-20). The boundary must stay the loudest thing the overlay draws —
@@ -81,7 +90,33 @@ export class SelectionOverlay {
     // fill, which is how the 2026-08-11 version failed.
     this._matMesh = new THREE.LineBasicMaterial({
       color: INK, transparent: true, opacity: 0.30,
-      depthTest: false, depthWrite: false, fog: false,
+      depthTest: true, depthWrite: false, fog: false,
+    });
+    /**
+     * The selection's own shading, on its own lattice.
+     *
+     * ⚠️ A MULTIPLY, NOT A TINT, and the factor is the one the vertex path used,
+     * so the selection reads exactly as it did — only with an edge that lands
+     * where the boundary is. Scaling every channel equally preserves hue and the
+     * order of values inside the selection, which is the whole argument of the
+     * 2026-08-20 note: the cells being judged still show their own colour.
+     */
+    const d = opts.darken ?? 0.62;
+    this._fillMat = new THREE.MeshBasicMaterial({
+      color: new THREE.Color(d, d, d),
+      blending: THREE.MultiplyBlending,
+      // ⚠️ REQUIRED, AND THREE SAYS SO OUT LOUD: "MultiplyBlending requires
+      // material.premultipliedAlpha = true". Without it the blend silently
+      // falls back and the fill paints a FLAT GREY SHEET over the terrain —
+      // which is exactly what it did on the first run, 104 console errors deep,
+      // while the picture just looked like the analysis layer had vanished.
+      premultipliedAlpha: true,
+      transparent: true,
+      side: THREE.DoubleSide,
+      depthTest: true, depthWrite: false, fog: false,
+      // Pulled a hair toward the camera so it cannot z-fight the surface it
+      // sits on. Lines cannot use this; a filled quad can.
+      polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -8,
     });
     /** segments drawn by the last build, for the self-test */
     this.count = 0;
@@ -91,6 +126,9 @@ export class SelectionOverlay {
     this.meshSuppressed = false;
     this._line = null;
     this._mesh = null;
+    this._fill = null;
+    /** filled cells in the last build, for the self-test */
+    this.fillCount = 0;
     /**
      * The selection this overlay is currently drawing, kept so the SAME
      * selection can be re-draped after the ground under it moves.
@@ -105,7 +143,7 @@ export class SelectionOverlay {
   setVisible(on) { this.group.visible = !!on; }
 
   _clear() {
-    for (const k of ["_line", "_mesh"]) {
+    for (const k of ["_line", "_mesh", "_fill"]) {
       if (this[k]) {
         this.group.remove(this[k]);
         this[k].geometry.dispose();
@@ -115,6 +153,7 @@ export class SelectionOverlay {
     this.count = 0;
     this.meshCount = 0;
     this.meshSuppressed = false;
+    this.fillCount = 0;
   }
 
   /**
@@ -261,6 +300,71 @@ export class SelectionOverlay {
     }
 
     if (!pts.length) return;
+    // ── the selection, filled on the boundary's own corners ──────────────
+    // ⚠️⚠️ THE SAME cornerZ / px / py THE BOUNDARY IS TRACED FROM, which is the
+    // entire reason this exists. The shading used to be mixed into the surface's
+    // vertex colours; the surface has ONE VERTEX PER CELL CENTRE, so a hard mask
+    // edge was interpolated across a whole cell and the outline ran down the
+    // middle of the gradient it produced. Built as quads on the lattice, the
+    // fill and the outline are the same geometry and cannot disagree.
+    /**
+     * Corner height for the FILL — the highest of the four cells meeting there,
+     * not their mean.
+     *
+     * ⚠️⚠️ THE MEAN SINKS INTO CONVEX GROUND (Marc, 2026-09-27, with a ridge
+     * circled: "parts of the face are not shaded"). Averaging smooths, so over a
+     * crest the mean corner sits BELOW the surface built from the centres
+     * themselves — and once the fill is depth-tested, as the same report asked
+     * for, the quad is correctly hidden inside the hill. Hollows kept their
+     * shading because there the mean sits above the surface, which is why only
+     * half the selection looked wrong.
+     *
+     * The maximum rides at or above the surface everywhere. The BOUNDARY keeps
+     * the mean — it is a line on the lattice, it reads correctly, and it is not
+     * what dropped out.
+     */
+    const fillZ = (R, C) => {
+      let hi = -Infinity;
+      for (let r = R - 1; r <= R; r++) {
+        if (r < 0 || r >= nrows) continue;
+        for (let c = C - 1; c <= C; c++) {
+          if (c < 0 || c >= ncols) continue;
+          const v = z[r * ncols + c];
+          if (Number.isFinite(v) && v > hi) hi = v;
+        }
+      }
+      // ⚠️ A QUARTER OF A CELL, NOT FIVE MILLIMETRES. The boundary's lift only
+      // has to stop a LINE shimmering against the surface; the fill has to clear
+      // whatever the surface does between four samples, which on this ground is
+      // centimetres, not millimetres.
+      return hi > -Infinity ? hi + Math.max(cell * 0.25, 0.05) : NaN;
+    };
+    const fill = [];
+    for (let r = 0; r < nrows; r++) {
+      for (let c = 0; c < ncols; c++) {
+        if (!mask[r * ncols + c]) continue;
+        const zA = fillZ(r, c), zB = fillZ(r, c + 1);
+        const zC = fillZ(r + 1, c + 1), zD = fillZ(r + 1, c);
+        // A cell with no measurement at one of its corners is not filled, for
+        // the same reason `seg` skips it: a hole must stay a hole.
+        if (!Number.isFinite(zA) || !Number.isFinite(zB)
+          || !Number.isFinite(zC) || !Number.isFinite(zD)) continue;
+        const x0 = px(c), x1 = px(c + 1), y0 = py(r), y1 = py(r + 1);
+        fill.push(x0, y0, zA, x1, y0, zB, x1, y1, zC);
+        fill.push(x0, y0, zA, x1, y1, zC, x0, y1, zD);
+      }
+    }
+    this.fillCount = fill.length / 9;
+    if (fill.length) {
+      const fg = new THREE.BufferGeometry();
+      fg.setAttribute("position",
+        new THREE.BufferAttribute(new Float32Array(fill), 3));
+      this._fill = new THREE.Mesh(fg, this._fillMat);
+      this._fill.frustumCulled = false;
+      this._fill.renderOrder = 12;   // under the lattice (13) and the boundary (14)
+      this.group.add(this._fill);
+    }
+
     const g = new THREE.BufferGeometry();
     g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(pts), 3));
     this._line = new THREE.LineSegments(g, this._mat);
@@ -273,6 +377,7 @@ export class SelectionOverlay {
   dispose() {
     this._clear();
     this._matMesh.dispose();
+    this._fillMat.dispose();
     this._mask = null;   // never hold a grid-sized array past the tile it indexes
     this._mat.dispose();
   }

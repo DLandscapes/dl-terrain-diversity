@@ -1,0 +1,925 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>DL-TerrainDiversity — the morph, 16:9</title>
+<!-- ⚠️ SERVED BY tools/capture-server.py, NOT BY launcher.py. The page POSTs each
+     frame to /frame, which the app's own server does not accept, and downloads
+     are blocked in the Browser pane so the page cannot save them itself.
+       python tools/capture-server.py
+     then open http://127.0.0.1:8999/morphfilm.html
+
+     ⚠️ NO requestAnimationFrame ANYWHERE IN THE RENDER LOOP. rAF is paused
+     whenever the tab is not displayed, and a capture loop built on it stalls
+     forever while looking exactly like a hung renderer. Every phase of this
+     project has recorded that trap. Frames are drawn on demand, in order, with a
+     bare setTimeout yield so the POSTs flush. -->
+<style>
+  body { margin: 0; background: #14130F; color: #E8E4DA;
+         font: 13px/1.5 "Source Sans 3", system-ui, sans-serif; }
+  #wrap { display: flex; gap: 14px; padding: 14px; align-items: flex-start; }
+  canvas { width: 960px; height: 540px; background: #FDFCF9; }
+  #side { flex: 1; min-width: 0; }
+  pre { background: #1D1C17; padding: 8px; height: 320px; overflow: auto;
+        white-space: pre-wrap; font-size: 12px; }
+  button { font: inherit; padding: 6px 12px; margin: 0 8px 8px 0; }
+  input { width: 60px; font: inherit; }
+</style>
+<div id="wrap">
+  <canvas id="stage" width="1920" height="1080"></canvas>
+  <div id="side">
+    <div>
+      <button id="one">draw one frame</button>
+      <label>t <input id="t" value="0" type="number" step="0.5"></label>
+    </div>
+    <div>
+      <button id="sheet">contact sheet — 12 frames</button>
+      <button id="go">RENDER the whole loop</button>
+    </div>
+    <pre id="log">ready.</pre>
+  </div>
+</div>
+<script type="module">
+import { DEM } from "./static/dem.js";
+import { loadGeoTIFF } from "./static/geotiff.js";
+import { buildStatesFrom } from "./static/morphstates.js";
+import {
+  W, H, FPS, DURATION, ORDER, HOLD, MOVE, stateAt, mixInto, drawProfiles,
+  drawTerrain, drawPlan, drawSection, drawHatch, blockMeans, framePath, PANEL_R, readingsOf, PANELS, INK, STAGE, RED, DIM, FONT,
+  FLAT_DEG,
+} from "./static/morphfilm.js";
+
+/**
+ * Filmstrip thumbnails — square callouts INTO the patch, not pictures of it.
+ *
+ * ⚠️ THEY ARE RENDERED WIDE AND THEN CROPPED, not drawn small. Rendering
+ * directly into a 72 px box would put the whole tile in it, edges and all, and
+ * the edges are exactly what a callout is meant to lose. So each is drawn at
+ * SRC_W x SRC_H with the full patch, and a square out of the middle is what the
+ * strip shows — which also means the crop can be retuned without re-rendering.
+ */
+const THUMB = 74;                       // displayed, square
+
+/**
+ * ⚠⚠ THE OVERSAMPLE FOLLOWS THE RENDER SCALE. It is a RATIO, not a size:
+ * CROP / (THUMB x SS) must stay at 2.5, because that is the ratio the thumbnail
+ * was drawn for. The 4K pass hard-coded the doubled numbers instead of scaling
+ * them, which left the 1080p render downsampling 372 px into 74 — 5.0x — and
+ * MEASURABLY BROKE IT: the 1 px contour lines fragmented into dashes and the
+ * band's midtones fell from 9.1 % to 5.5 %. It looked like a slightly lighter
+ * strip, not like a bug. Base values are the 1x case; setScale multiplies.
+ */
+const SRC_W0 = 640, SRC_H0 = 360;       // offscreen render at 1x, whole patch
+const CROP0 = 186;                      // side of the square taken from it
+let SRC_W = SRC_W0, SRC_H = SRC_H0, CROP = CROP0;
+const THUMB_R = 8;                      // corner radius, matching the panels
+let THUMBS = null;
+
+const el = document.getElementById("log");
+const log = (m) => { el.textContent += "\n" + m; el.scrollTop = el.scrollHeight; };
+const cv = /** @type {HTMLCanvasElement} */ (document.getElementById("stage"));
+const g = cv.getContext("2d");
+
+/**
+ * Output supersampling. 1 = 1920x1080, 2 = 3840x2160.
+ *
+ * ⚠️⚠️ THIS IS A TRUE RESOLUTION CHANGE, NOT AN UPSCALE. Every mark in this film
+ * is drawn — contours, hatches, symbols, type — so doubling the canvas and
+ * scaling the context redraws all of it at twice the sample rate. Upscaling the
+ * 1080p frames afterwards would give a 4K file containing 1080p linework, which
+ * is the one thing a drawing cannot survive: a soft hairline reads as a
+ * different weight, and weight is carrying meaning here.
+ *
+ * ⚠️ SETTING canvas.width RESETS THE CONTEXT, so the transform is re-applied at
+ * the top of every frame rather than once.
+ */
+let SS = 1;
+function setScale(s) {
+  SS = s;
+  cv.width = W * s;
+  cv.height = H * s;
+  SRC_W = SRC_W0 * s; SRC_H = SRC_H0 * s; CROP = CROP0 * s;
+  // ⚠ REBUILT, NOT LEFT ALONE. boot() returns early once the grounds exist, so
+  // a setScale AFTER a boot would otherwise keep thumbnails rendered for the
+  // other scale — which is exactly how the 1080p regression got in.
+  if (STATES) buildThumbs();
+}
+
+const TILE = "orndalen/orndalen_poi_025m.tif";
+
+/**
+ * The DL mark, bottom right — as in MORPH-16x9 - 005.
+ *
+ * ⚠️ IT IS PURE BLACK ON ALPHA (measured: every visible pixel is 0,0,0), so it
+ * drops into a black-and-white frame with nothing to convert.
+ *
+ * ⚠️ A FAILED LOAD IS LOGGED, NOT SWALLOWED. An <img> that 404s draws nothing
+ * and throws nothing, so the mark would simply be absent from 1,150 frames and
+ * the only way to find out would be to look at one.
+ */
+const LOGO = new Image();
+const LOGO_PX = 18;
+let LOGO_OK = false;
+
+let STATES = null, WORK = null, DOMAINS = null, BASELINE = null;
+
+async function boot() {
+  if (STATES) return;
+  await new Promise((res) => {
+    LOGO.onload = () => { LOGO_OK = true; res(); };
+    LOGO.onerror = () => { log("⚠️ logo-dl.png did not load — mark omitted"); res(); };
+    LOGO.src = "/static/logo-dl.png";
+  });
+  log("loading " + TILE + " ...");
+  const r = await fetch("/data/" + TILE, { cache: "no-store" });
+  if (!r.ok) throw new Error(TILE + ": " + r.status);
+  const base = DEM.fromRaw(loadGeoTIFF(await r.arrayBuffer(), { name: TILE }));
+  log("building the six grounds ...");
+  const t0 = performance.now();
+  STATES = buildStatesFrom(base);
+  WORK = base.clone();
+  log("built in " + ((performance.now() - t0) / 1000).toFixed(1) + " s: "
+    + STATES.map((s) => s.id).join(", "));
+
+  // ⚠️ DOMAINS AND THE BAR SCALE ARE TAKEN ONCE, FROM THE SURVEYED GROUND, AND
+  // HELD. A scale that restretched itself per frame would draw every ground as
+  // equally varied and every bar as equally full — which is exactly the claim
+  // the film is testing.
+  const b = readingsOf(STATES[0].dem);
+  BASELINE = b.values;
+  const pct = (f, lo, hi) => {
+    const v = [...f].filter(Number.isFinite).sort((a, c) => a - c);
+    const at = (p) => v[Math.round((p / 100) * (v.length - 1))];
+    return [at(lo), at(hi)];
+  };
+  // ⚠️⚠️ THE SYMBOL PANELS NEED A DOMAIN IN BLOCK MEANS, NOT IN CELL VALUES.
+  // A block mean is far smoother than the cells it averages: mean depth over a
+  // 4 m block is centimetres where a single cell can be half a metre. Left on
+  // the old [0,1] the depression circles would every one of them have been a
+  // dot, and the panel would have read as "almost no water" on every ground.
+  // Measured across the whole film below, then held.
+  DOMAINS = {
+    flat: [FLAT_DEG, 0],
+    twi: [0, 1],      // replaced by the sweep
+    tri: pct(b.fields.tri, 2, 98),
+    dep: [0, 1],      // replaced by the sweep
+  };
+  // ⚠️⚠️ THE SCALE IS SAMPLED ACROSS THE WHOLE FILM, NOT ACROSS THE SIX GROUNDS.
+  // Taken from the held states only it read 498 hollows as the maximum, while a
+  // frame between uniform and landform measures 836 — so the bar ran off the
+  // right of the screen (Marc, 2026-09-08). Those intermediate figures are real
+  // measurements of the surface on show, so the honest fix is a scale that
+  // covers what is drawn, not a clamp that hides it. The clamp stays anyway, as
+  // a guard: a bar that silently overshoots its frame is worse than one that
+  // stops.
+  const maxes = { flat: 0, twi: 0, tri: 0, dep: 0 };
+  let pmax = 0; const depAll = [], twiAll = [];
+  const SAMPLES = 64;
+  for (let k = 0; k <= SAMPLES; k++) {
+    const t = (k / SAMPLES) * DURATION;
+    const st = stateAt(t);
+    mixInto(WORK, STATES[idOf(st.a)].dem.z, STATES[idOf(st.b)].dem.z, st.u);
+    const rd = readingsOf(WORK);
+    for (const kk of Object.keys(maxes)) maxes[kk] = Math.max(maxes[kk], rd.values[kk]);
+    for (const q of rd.ponds) pmax = Math.max(pmax, q.v);
+    for (const bm of blockMeans(rd.fields.dep, WORK.nrows, WORK.ncols, 16))
+      depAll.push(bm.v);
+    for (const bm of blockMeans(rd.fields.twi, WORK.nrows, WORK.ncols, 16))
+      twiAll.push(bm.v);
+  }
+  // ⚠️⚠️ A PERCENTILE, NOT THE MAXIMUM. Set by the extreme, one deep block sets
+  // the scale and every ordinary block collapses to a dot — the same skew that
+  // killed the per-pond circles, reappearing one level up. At the 98th
+  // percentile a typical wet block draws a symbol you can see, and the handful
+  // above it clamp to a full circle, which is the correct thing for a symbol to
+  // do at the top of its range.
+  const q = (arr, pc) => {
+    const v = arr.filter(Number.isFinite).sort((a, b2) => a - b2);
+    return v.length ? v[Math.round((pc / 100) * (v.length - 1))] : 1;
+  };
+  DOMAINS.dep = [0, q(depAll, 98) || 1];
+  DOMAINS.twi = [q(twiAll, 2), q(twiAll, 98)];
+  log("symbol scales (p98 of block means): depressions <= "
+    + DOMAINS.dep[1].toFixed(3) + " m   ·   wetness "
+    + DOMAINS.twi[0].toFixed(2) + " .. " + DOMAINS.twi[1].toFixed(2));
+  window.__MAX = maxes;
+  window.__PONDMAX = pmax;
+  log("pond scale held: largest 2 m patch holds " + pmax.toFixed(2) + " m³");
+  log("scales sampled over the whole film: flat<=" + maxes.flat.toFixed(1)
+    + "%  twi<=" + maxes.twi.toFixed(2) + "  geodiv<=" + maxes.tri.toFixed(4)
+    + "  hollows<=" + Math.round(maxes.dep));
+
+  buildThumbs();
+}
+
+/**
+ * ⚠️ THUMBNAILS ARE BUILT ONCE PER SCALE, NOT PER FRAME. Six drawPlan calls a
+ * frame for the strip would roughly double the render, for six pictures that
+ * never change. They are rendered at 2.5x the box and drawn down, so the strip
+ * is not soft — see the SRC_W0 note for why that ratio is held.
+ */
+function buildThumbs() {
+  THUMBS = STATES.map((s) => {
+    const c = document.createElement("canvas");
+    c.width = SRC_W0 * SS; c.height = SRC_H0 * SS;
+    const cg = c.getContext("2d");
+    // ⚠⚠ THE SOURCE IS DRAWN AT SS, NOT MERELY SIZED AT SS. More pixels alone
+    // makes the strip LIGHTER, not sharper: drawPlan strokes a contour at
+    // lineWidth 1 in whatever units it is handed, so a 1280-wide source puts a
+    // 1 px line in a 372 px crop where a 640-wide source puts a 1 px line in a
+    // 186 px crop — HALF the relative weight. Measured on the band: midtones
+    // 9.1 % at 1x against 5.6 % in the 4K, i.e. the 4K thumbnails were already
+    // washing out and it read as a slightly lighter strip, not as a fault.
+    // Transforming instead means the SAME drawing at twice the resolution:
+    // 2 px lines in a 372 px crop shown in a 148 px box. Ratio and weight both
+    // held. THE PIXEL COUNT WAS NEVER THE POINT.
+    cg.setTransform(SS, 0, 0, SS, 0, 0);
+    cg.fillStyle = STAGE; cg.fillRect(0, 0, SRC_W0, SRC_H0);
+    // ⚠️ the thumbnails follow the big view. A strip of axonometrics beside a
+    // plan would read as two different places rather than the same one.
+    drawPlan(cg, s.dem, { x: 0, y: 0, w: SRC_W0, h: SRC_H0, labels: false });
+    return c;
+  });
+  log("filmstrip: " + THUMBS.length + " rendered at " + SRC_W + "x" + SRC_H
+    + ", shown as " + THUMB + "px squares cropped " + CROP + "px from centre");
+}
+
+function fmt(id, v) {
+  if (id === "flat") return v.toFixed(1) + " %";
+  if (id === "twi") return v.toFixed(2);
+  if (id === "tri") return v.toFixed(4);
+  return String(Math.round(v));
+}
+
+function frameAt(t) {
+  const st = stateAt(t);
+  const A = STATES[idOf(st.a)], B = STATES[idOf(st.b)];
+  mixInto(WORK, A.dem.z, B.dem.z, st.u);
+  const rd = readingsOf(WORK);
+
+  g.setTransform(SS, 0, 0, SS, 0, 0);
+  g.fillStyle = STAGE; g.fillRect(0, 0, W, H);
+
+  // ── header ───────────────────────────────────────────────────────────────
+  // ⚠️ NO RED RULE ABOVE THE TITLE (Marc, 2026-09-08). The red is spent on the
+  // progress bar and on the bars that rise above the surveyed value; a third
+  // use made it decoration rather than a signal.
+  // ⚠️⚠️ THE TITLE IS THE FINDING, NOT AN INVENTORY. "One ground, six ways to
+  // change it" described the footage and, doing so, claimed there are six ways
+  // (Marc, 2026-09-09 — "these are just a few within endless possibilities").
+  // This line is the project's own, from the 2026-08-27 sheet: "The same earth,
+  // spent differently, is not the same ground." It states the result — matched
+  // volume, different placement, different ground — and the paper is named
+  // directly beneath it, so the film sits under the argument rather than under
+  // its own count. The count survives as "six of many".
+  g.fillStyle = INK; g.font = "700 40px " + FONT; g.textBaseline = "alphabetic";
+  g.fillText("The same earth, spent differently", 60, 60);
+  g.fillStyle = DIM; g.font = "19px " + FONT;
+  g.fillText("Digital terrain analysis as an interface of care"
+    + "  ·  six of many gestures", 60, 90);
+  // ⚠️ FOUR SHORT LINES RATHER THAN TWO CRAMMED ONES. Everything here has to
+  // finish left of the timeline at x = 900; the byline and the site each ran
+  // past that when combined, so they take a line apiece.
+  g.font = "13px " + FONT;
+  g.fillText("Marc-Eduard Ihle  ·  UiT The Arctic University of Norway", 60, 114);
+  g.fillText("Ørndalen, northern Tromsøya — 64 × 64 m at 0.25 m"
+    + "  ·  site of the LAR-3072 studio", 60, 132);
+
+  // the state being shown, or the two it is between
+  const nameA = STATES[idOf(st.a)].label, nameB = B.label;
+  g.font = "700 30px " + FONT;
+  g.fillStyle = INK;
+  const label = st.held || st.u < 0.02 ? nameA
+    : st.u > 0.98 ? nameB : nameA + "  →  " + nameB;
+  g.fillText(label, 60, 186);
+  g.font = "19px " + FONT; g.fillStyle = DIM;
+  g.fillText(st.held ? STATES[idOf(st.a)].note : "", 60, 212);
+
+  // ── the timeline, top right, beside the title ────────────────────────────
+  drawTimeline(t, st);
+
+  // ── left: the ground ─────────────────────────────────────────────────────
+  // ⚠️ step 1, NOT 2. At step 2 a terrace riser is near-vertical in screen
+  // space and two cells wide, so the quads there are large and the riser reads
+  // as a staircase of grey blocks - a drawing artefact that looks exactly like a
+  // coarser terrace than the one measured. Measured cost: 45 ms a frame at
+  // step 2, about 120 ms at step 1, which is 2.5 minutes over the whole render.
+  // ⚠️ THE PLAN IS FLUSH LEFT WITH THE TEXT ABOVE IT (x = 60), and the section
+  // takes the width that frees up. Both share one vertical mapping, so a
+  // northing reads across at the same height in each.
+  const geo = drawPlan(g, WORK, { x: 60, y: 228, w: 748, h: 748,
+    ponds: rd.ponds, pondMax: window.__PONDMAX });
+  drawSection(g, WORK, geo, { x: 834, w: 270, ref: STATES[0].dem.z });
+
+  // ── right: three attributes ──────────────────────────────────────────────
+  // The foot is free now that the timeline has moved up, so the three panels
+  // take the column height: 3 x 250 + 2 x 25 = 800, ending at y=1000 and
+  // matching the terrain, which leaves a clean 80 px band for the credit.
+  // FOUR panels now that wetness is back: 4 x 186 + 3 x 18 = 798, still
+  // ending level with the plan at y = 998.
+  // 4 x 180 + 3 x 18 = 774 — the same height as the plan and the section, so
+  // all three columns finish on one line (Marc, 2026-09-08).
+  // 4 x 172 + 3 x 20 = 748 — level with the plan and the section.
+  const PX = 1160, PW = 172, GAP = 20;
+  let y = 228;
+  for (const p of PANELS) {
+    drawHatch(g, rd.fields[p.id], WORK.nrows, WORK.ncols, {
+      x: PX, y, w: PW, h: PW, domain: DOMAINS[p.id],
+      angle: p.angle, period: p.period, solid: p.solid, blur: p.blur,
+      stippleUndefined: p.stipple, symbolCells: p.symbolCells,
+      symbolOutline: p.symbolOutline,
+      // 1.10 crops five per cent off each side, which is enough to put the
+      // grid's own edge outside the frame — see drawHatch.
+      zoom: 1.10, radius: PANEL_R,
+    });
+    framePath(g, PX + 0.5, y + 0.5, PW, PW);
+    g.strokeStyle = "#D8D4CA"; g.lineWidth = 1; g.stroke();
+
+    const tx = PX + PW + 26;
+    g.fillStyle = DIM; g.font = "700 13px " + FONT;
+    g.fillText(p.label.toUpperCase(), tx, y + 18);
+    const v = rd.values[p.id], base = BASELINE[p.id];
+    g.fillStyle = INK; g.font = "700 42px " + FONT;
+    g.fillText(fmt(p.id, v), tx, y + 66);
+    g.fillStyle = DIM; g.font = "15px " + FONT;
+    // ⚠️ the defined share rides with the wetness number on EVERY frame. A mean
+    // over 54 % of a tile is not a mean over the tile, and the only place that
+    // can be said is next to the number itself.
+    g.fillText(p.id === "twi"
+      ? "mean TWI · defined on " + rd.twiDefined.toFixed(0) + "% of the surface"
+      : p.unit, tx, y + 90);
+
+    // the bar — held scale, and a tick showing where the surveyed ground sat,
+    // so "more" and "less" are readable without remembering a number
+    // ⚠️ THE BAR ENDS WHERE THE TIMELINE ENDS (x = W - 60), so a full bar and a
+    // full timeline are the same length and the frame has one right margin.
+    const bw = (W - 60) - tx, bh = 10, by = y + 110;
+    g.fillStyle = "#E7E4DC"; g.fillRect(tx, by, bw, bh);
+    const max = window.__MAX[p.id] || 1;
+    g.fillStyle = v > base ? RED : INK;
+    g.fillRect(tx, by, Math.min(bw, Math.max(2, (v / max) * bw)), bh);
+    g.fillStyle = INK;
+    g.fillRect(tx + Math.min(bw, (base / max) * bw) - 1, by - 6, 2, bh + 12);
+    g.fillStyle = DIM; g.font = "13px " + FONT;
+    g.fillText("as surveyed " + fmt(p.id, base), tx, by + 28);
+
+    y += PW + GAP;
+  }
+
+  // ── foot: the filmstrip, the ticks, the red line ─────────────────────────
+  //
+  // ⚠️ THE THUMBNAILS ARE THE SIX GROUNDS THEMSELVES, rendered once at boot from
+  // the same drawTerrain that draws the big one. A strip of generic icons would
+  // be a legend; a strip of the actual surfaces is a map of the film, and the
+  // viewer can see where a state has already been and where it is going.
+  // ── credits, bottom right ────────────────────────────────────────────────
+  // ⚠️⚠️ THE CREDIT NAMES WHAT WAS USED AND WHERE TO FIND IT. Both the ground
+  // and the instrument came from somewhere, and a viewer who wants to check
+  // either should not have to ask: the data is Kartverket's, fetched from
+  // hoydedata.no (the service named in data/orndalen/SOURCE.txt — kartverket.no
+  // would be the organisation rather than the source), and the instrument is
+  // published and reachable.
+  //
+  // ⚠️ THE © SITS WITH THE HOLDER, NOT THE PRODUCT. Copyright belongs to
+  // Digital Landscapes; DL-TerrainDiversity is the thing it holds. Writing
+  // "© DL-TerrainDiversity" would attribute a right to a piece of software.
+  //
+  // The DL mark that used to sit here has gone: a wordmark and a monogram
+  // saying the same thing twice, and the words carry the licence.
+  // the mark takes the corner and the credit ends to its left, so the frame
+  // keeps one right margin at x = W - 60 like everything else
+  const lx = W - 60 - LOGO_PX, ly = H - 26 - LOGO_PX + 4;
+  if (LOGO_OK) {
+    // ⚠️ HIGH-QUALITY RESAMPLING, EXPLICITLY. A 109 px source drawn at 18 through
+    // the default bilinear step samples too few source pixels and the ring comes
+    // out ragged. One draw per frame, so a better filter costs nothing.
+    g.save();
+    g.imageSmoothingEnabled = true;
+    g.imageSmoothingQuality = "high";
+    g.drawImage(LOGO, lx, ly, LOGO_PX, LOGO_PX);
+    g.restore();
+  }
+  g.textAlign = "right";
+  g.fillStyle = DIM; g.font = "15px " + FONT;
+  g.fillText("Data: Terrain data © Kartverket — NLOD / CC BY 4.0 — hoydedata.no"
+    + "  |  Tooling: DL-TerrainDiversity © Digital Landscapes — digital-landscapes.com",
+    lx - 14, H - 26);
+  g.textAlign = "left";
+  return rd;
+}
+
+/**
+ * The timeline: six square callouts, their labels, and the bar — all in the
+ * band to the RIGHT of the title (Marc, 2026-09-08).
+ *
+ * ⚠️ THE BAR SPANS THE SAME x RANGE AS THE THUMBNAILS AND NOTHING ELSE. It used
+ * to run the full width of the frame, so a tick at "t = 14 s" sat under whatever
+ * happened to be at 14/46 of 1920 px. Now the bar, the ticks and the thumbnails
+ * share one coordinate system and a tick lands under the ground it belongs to.
+ */
+function drawTimeline(t, st) {
+  // ⚠️ X0 MOVED 780 -> 900 when the title became the paper's, which is longer.
+  // The strip keeps 960 px, so seven thumbnails at 74 px still sit 82 px apart.
+  const X0 = 900, X1 = W - 60, TW = X1 - X0;
+  const span = HOLD + MOVE;
+  const u = ((t % DURATION) + DURATION) % DURATION / DURATION;
+  // ⚠️ THE STRIP'S FOOT LANDS ON THE STATE-NAME BASELINE (y = 156). thumbY 48 +
+  // 74 + 16 puts the labels at 138 and the bar at 150-156, so the bar's underside
+  // and the "Terraced, uniform" baseline are one line across the frame.
+  const thumbY = 78, labelBase = thumbY + THUMB + 16;
+  const barY = labelBase + 12, barH = 6;
+
+  // the centre of stop i, in bar coordinates: the middle of its hold
+  const centreOf = (i) => X0 + ((i * span + HOLD / 2) / DURATION) * TW;
+
+  // ⚠️ ALL SEVEN STOPS, INCLUDING THE REPEAT. The seventh IS the first ground
+  // again, and drawing it is what makes the strip say that the film returns
+  // rather than stops — the right end used to be empty (Marc, 2026-09-08).
+  for (let i = 0; i < ORDER.length; i++) {
+    const cx = centreOf(i);
+    const tx = Math.max(X0, Math.min(X1 - THUMB, cx - THUMB / 2));
+    // ⚠️ THE RING FOLLOWS THE NEARER GROUND, THE SAME RULE AS THE BIG LABEL.
+    // Following st.a — the ground being LEFT — meant that at the end of a move
+    // the caption read "Terraced by landform" while the strip still ringed
+    // "Terraced, uniform". Two statements about the same instant, disagreeing.
+    //
+    // ⚠️⚠️ AND THE SEVENTH THUMBNAIL NEVER RINGS, which is what keeps the loop
+    // exact. It is the first ground drawn a second time, so a test on the GROUND
+    // would ring both ends at once; a test on the STOP would ring the right end
+    // at t = 46 and the left end at t = 0, and those two frames have to be
+    // identical or the loop jumps. It is drawn faint instead: a note that the
+    // film returns, not a seventh place to be.
+    const cur = (st.held || st.u < 0.5) ? st.a : st.b;
+    const isRepeat = i === ORDER.length - 1;
+    const isNow = !isRepeat && idOf(i) === idOf(cur);
+
+    g.save();
+    if (isRepeat) g.globalAlpha = 0.45;
+    g.beginPath();
+    if (g.roundRect) g.roundRect(tx, thumbY, THUMB, THUMB, THUMB_R);
+    else g.rect(tx, thumbY, THUMB, THUMB);
+    g.clip();
+    // a square out of the middle of the wide render — the callout
+    g.drawImage(THUMBS[idOf(i)],
+      (SRC_W - CROP) / 2, (SRC_H - CROP) / 2, CROP, CROP,
+      tx, thumbY, THUMB, THUMB);
+    g.restore();
+
+    g.beginPath();
+    if (g.roundRect) g.roundRect(tx + 0.5, thumbY + 0.5, THUMB, THUMB, THUMB_R);
+    else g.rect(tx + 0.5, thumbY + 0.5, THUMB, THUMB);
+    g.strokeStyle = isNow ? RED : "#D8D4CA";
+    g.lineWidth = isNow ? 2.5 : 1;
+    g.stroke();
+    g.globalAlpha = 1;
+
+    g.fillStyle = isNow ? INK : DIM;
+    g.font = (isNow ? "700 " : "") + "12px " + FONT;
+    g.textAlign = "center";
+    g.fillText(STATES[idOf(i)].label, tx + THUMB / 2, labelBase);
+    g.textAlign = "left";
+  }
+
+  g.fillStyle = "#E7E4DC"; g.fillRect(X0, barY, TW, barH);
+  g.fillStyle = RED; g.fillRect(X0, barY, TW * u, barH);
+  for (let i = 0; i < ORDER.length; i++) {
+    const tx = X0 + ((i * span) / DURATION) * TW;
+    g.fillStyle = INK;
+    g.fillRect(Math.min(X1 - 2, tx - 1), barY, 2, barH);
+  }
+}
+
+/** ORDER holds ids; STATES holds objects. Map one to the other, once. */
+function idOf(i) {
+  const id = ORDER[i];
+  const k = STATES.findIndex((s) => s.id === id);
+  if (k < 0) throw new Error("no state built for " + id);
+  return k;
+}
+
+document.getElementById("one").onclick = async () => {
+  try {
+    await boot();
+    const t = parseFloat(document.getElementById("t").value) || 0;
+    const t0 = performance.now();
+    const rd = frameAt(t);
+    log("t=" + t.toFixed(2) + "s  " + (performance.now() - t0).toFixed(0) + " ms  "
+      + "flat " + rd.values.flat.toFixed(1) + "%  geodiv "
+      + rd.values.tri.toFixed(4) + "  hollows " + rd.values.dep);
+  } catch (e) { log("ERROR: " + (e && e.stack || e)); }
+};
+
+document.getElementById("sheet").onclick = async () => {
+  try {
+    await boot();
+    const n = 12;
+    log("contact sheet: " + n + " frames across " + DURATION.toFixed(1) + " s");
+    for (let i = 0; i < n; i++) {
+      const t = (i / n) * DURATION;
+      frameAt(t);
+      const png = cv.toDataURL("image/png");
+      const res = await fetch("/frame", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: "sheet_" + String(i).padStart(2, "0") + ".png",
+          png, dir: "morph-sheet",
+        }),
+      });
+      if (!res.ok) throw new Error("sink refused frame " + i);
+      log("  " + i + "  t=" + t.toFixed(1));
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    log("contact sheet done -> output/video/frames/morph-sheet/");
+  } catch (e) { log("ERROR: " + (e && e.stack || e)); }
+};
+
+document.getElementById("go").onclick = async () => {
+  try {
+    await boot();
+    const total = Math.round(DURATION * FPS);
+    log("rendering " + total + " frames at " + FPS + " fps (" + DURATION.toFixed(1) + " s)");
+    const t0 = performance.now();
+    for (let i = 0; i < total; i++) {
+      frameAt(i / FPS);
+      const png = cv.toDataURL("image/png");
+      let ok = false;
+      for (let a = 0; a < 3 && !ok; a++) {
+        try {
+          const res = await fetch("/frame", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              name: "frame_" + String(i).padStart(5, "0") + ".png",
+              png, dir: "morph",
+            }),
+          });
+          ok = res.ok;
+        } catch { /* transient — back off and try again */ }
+        if (!ok) await new Promise((r) => setTimeout(r, 150 * (a + 1)));
+      }
+      if (!ok) throw new Error("frame " + i + ": sink refused 3 attempts");
+      if (i % 25 === 0) {
+        const el2 = (performance.now() - t0) / 1000;
+        log(i + "/" + total + "  " + el2.toFixed(0) + "s elapsed, ~"
+          + ((el2 / (i + 1)) * (total - i - 1)).toFixed(0) + "s left");
+      }
+      if (i % 5 === 0) await new Promise((r) => setTimeout(r, 0));
+    }
+    log("DONE — " + total + " frames -> output/video/frames/morph/");
+  } catch (e) { log("ERROR: " + (e && e.stack || e)); }
+};
+
+/**
+ * Re-render a RANGE of frames into the existing pass.
+ *
+ * ⚠️ THIS EXISTS BECAUSE A BUG USUALLY AFFECTS A SUBSET. The filmstrip highlight
+ * was wrong only during the final hold — 100 frames of 1,150 — and re-rendering
+ * the whole loop to fix them costs nine minutes to redraw 1,050 frames that were
+ * already correct. Frames are a pure function of t, so a partial pass is exactly
+ * equal to a full one; that is the property the purity rule buys.
+ *
+ *   await renderRange(1050, 1149)
+ */
+window.renderRange = async (from, to) => {
+  await boot();
+  log("re-rendering frames " + from + "-" + to);
+  for (let i = from; i <= to; i++) {
+    frameAt(i / FPS);
+    const png = cv.toDataURL("image/png");
+    const res = await fetch("/frame", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "frame_" + String(i).padStart(5, "0") + ".png", png, dir: "morph",
+      }),
+    });
+    if (!res.ok) throw new Error("sink refused frame " + i);
+    if (i % 25 === 0) log("  " + i);
+    if (i % 5 === 0) await new Promise((r) => setTimeout(r, 0));
+  }
+  log("range done: " + from + "-" + to);
+  return "ok";
+};
+
+// ── the four clips for beats 8-11 of the three-minute film ──────────────────
+//
+// ⚠️⚠️ THESE ARE RENDERED, NOT SLICED OUT OF THE 46 s LOOP, and that is forced
+// rather than preferred. The loop's segments are 7 s each (3 s move, 4 s hold)
+// because that pace suits a standalone exhibition loop; the beats need 15, 17,
+// 20 and 13 s. Cutting 7 s of footage into a 17 s slot leaves ten seconds to
+// fill, and the only ways to fill them — freezing, looping, or slowing to 2.4x —
+// all make the film say something the ground does not. Frames are a pure
+// function of t, so rendering each clip at its own duration costs no more than
+// cutting one would and is exact.
+//
+// ⚠️ AND THEY ARE 1920x800, NOT 1080. The film deck puts its caption in a band
+// BELOW the picture, because every render this instrument makes is on a
+// near-white stage and dark type laid over it would be legible in some frames
+// and gone in others. So the clip has no header, no timeline and no credit —
+// the deck supplies all three.
+const CLIP_W = 1920, CLIP_H = 800, FADE_F = 10;   // 10 frames = 0.4 s
+const clipCv = document.createElement("canvas");
+clipCv.width = CLIP_W; clipCv.height = CLIP_H;
+const cg = clipCv.getContext("2d");
+
+const CLIPS = [
+  { n: 8, id: "level", frames: 375, from: "c1-surveyed", to: "levelled" },
+  { n: 9, id: "uniform", frames: 425, from: "c1-surveyed", to: "c3-uniform" },
+  { n: 10, id: "landform", frames: 500, from: "c3-uniform", to: "c4-landform" },
+  { n: 11, id: "where", frames: 325, from: "c4-landform", to: "c5-attribute" },
+];
+
+/**
+ * hold on A, move, hold on B — with the SAME trapezoidal rate as the loop.
+ *
+ * ⚠️ THE MOVE TAKES MOST OF THE CLIP NOW. It used to be a fifth held, a third
+ * moving and the rest held, with smoothstep inside the move — which put half the
+ * displacement into about 12 % of the clip and read as a jump between two stills.
+ * 12 % settling, 58 % moving, 30 % resting on the result, and the rate is flat
+ * through the middle of the move.
+ */
+const clipMix = (u) => {
+  const A = 0.12, M = 0.58, R = 0.18;
+  if (u <= A) return 0;
+  if (u >= A + M) return 1;
+  const x = (u - A) / M, k = 1 / (1 - R);
+  if (x < R) return (x * x / (2 * R)) * k;
+  if (x > 1 - R) return 1 - ((1 - x) * (1 - x) / (2 * R)) * k;
+  return (R / 2 + (x - R)) * k;
+};
+
+let CLIP_STATES = null, CLIP_MAX = null, CLIP_DOMAINS = null;
+
+function frameClip(u, demA, demB) {
+  mixInto(WORK, demA.z, demB.z, clipMix(u));
+  const rd = readingsOf(WORK);
+  cg.fillStyle = STAGE; cg.fillRect(0, 0, CLIP_W, CLIP_H);
+  const geo = drawPlan(cg, WORK, { x: 40, y: 22, w: 702, h: 702,
+    ponds: rd.ponds, pondMax: window.__PONDMAX });
+  drawSection(cg, WORK, geo, { x: 766, w: 248, ref: STATES[0].dem.z });
+
+  // 4 x 165 + 3 x 14 = 702, matching the clip's plan and section.
+  const PX = 1050, PW = 165, GAP = 14;
+  let y = 22;
+  for (const p of PANELS) {
+    drawHatch(cg, rd.fields[p.id], WORK.nrows, WORK.ncols, {
+      x: PX, y, w: PW, h: PW, domain: CLIP_DOMAINS[p.id],
+      angle: p.angle, period: p.period, solid: p.solid, blur: p.blur,
+      stippleUndefined: p.stipple, symbolCells: p.symbolCells,
+      symbolOutline: p.symbolOutline,
+      zoom: 1.10, radius: PANEL_R,
+    });
+    framePath(cg, PX + 0.5, y + 0.5, PW, PW);
+    cg.strokeStyle = "#D8D4CA"; cg.lineWidth = 1; cg.stroke();
+
+    const tx = PX + PW + 24;
+    cg.fillStyle = DIM; cg.font = "700 13px " + FONT;
+    cg.fillText(p.label.toUpperCase(), tx, y + 17);
+    const v = rd.values[p.id], base = BASELINE[p.id];
+    cg.fillStyle = INK; cg.font = "700 40px " + FONT;
+    cg.fillText(fmt(p.id, v), tx, y + 62);
+    cg.fillStyle = DIM; cg.font = "15px " + FONT;
+    cg.fillText(p.id === "twi"
+      ? "mean TWI · defined on " + rd.twiDefined.toFixed(0) + "%"
+      : p.unit, tx, y + 85);
+    const bw = (CLIP_W - 50) - tx, bh = 10, by = y + 100;
+    cg.fillStyle = "#E7E4DC"; cg.fillRect(tx, by, bw, bh);
+    cg.fillStyle = v > base ? RED : INK;
+    cg.fillRect(tx, by, Math.min(bw, Math.max(2, (v / CLIP_MAX[p.id]) * bw)), bh);
+    cg.fillStyle = INK;
+    cg.fillRect(tx + Math.min(bw, (base / CLIP_MAX[p.id]) * bw) - 1, by - 6, 2, bh + 12);
+    cg.fillStyle = DIM; cg.font = "13px " + FONT;
+    cg.fillText("as surveyed " + fmt(p.id, base), tx, by + 28);
+    y += PW + GAP;
+  }
+  return rd;
+}
+
+window.renderClips = async () => {
+  await boot();
+  const { levelledFrom } = await import("./static/morphstates.js");
+  const lev = levelledFrom(STATES[0].dem);
+  log("levelled: cut " + lev.cut.toFixed(1) + " m³, fill " + lev.fill.toFixed(1)
+    + " m³, net " + lev.net.toFixed(4) + " m³");
+  CLIP_STATES = Object.fromEntries(STATES.map((s) => [s.id, s.dem]));
+  CLIP_STATES["levelled"] = lev.dem;
+
+  // ⚠️ SCALES HELD ACROSS THE FOUR CLIPS, not per clip. Four bars each full to
+  // their own clip's maximum would say every gesture was equally extreme.
+  const used = ["c1-surveyed", "levelled", "c3-uniform", "c4-landform", "c5-attribute"];
+  CLIP_MAX = { flat: 0, twi: 0, tri: 0, dep: 0 };
+  for (const id of used) {
+    const v = readingsOf(CLIP_STATES[id]).values;
+    for (const k of Object.keys(CLIP_MAX)) CLIP_MAX[k] = Math.max(CLIP_MAX[k], v[k]);
+  }
+  CLIP_DOMAINS = DOMAINS;
+  log("clip scales: flat<=" + CLIP_MAX.flat.toFixed(1) + "%  geodiv<="
+    + CLIP_MAX.tri.toFixed(4) + "  hollows<=" + CLIP_MAX.dep);
+
+  for (const c of CLIPS) {
+    const dir = "clip-" + String(c.n).padStart(2, "0") + "-" + c.id;
+    log("rendering " + dir + " — " + c.frames + " frames, "
+      + c.from + " → " + c.to);
+    for (let i = 0; i < c.frames; i++) {
+      frameClip(i / (c.frames - 1), CLIP_STATES[c.from], CLIP_STATES[c.to]);
+      // the ease lives in the footage, not in a slide transition
+      const fin = Math.min(1, i / FADE_F);
+      const fout = Math.min(1, (c.frames - 1 - i) / FADE_F);
+      const a = 1 - Math.min(fin, fout);
+      if (a > 0) {
+        cg.save(); cg.globalAlpha = a; cg.fillStyle = STAGE;
+        cg.fillRect(0, 0, CLIP_W, CLIP_H); cg.restore();
+      }
+      const png = clipCv.toDataURL("image/png");
+      let ok = false;
+      for (let k = 0; k < 3 && !ok; k++) {
+        try {
+          const res = await fetch("/frame", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              name: "f_" + String(i).padStart(5, "0") + ".png", png, dir,
+            }),
+          });
+          ok = res.ok;
+        } catch { /* transient */ }
+        if (!ok) await new Promise((r) => setTimeout(r, 150 * (k + 1)));
+      }
+      if (!ok) throw new Error(dir + " frame " + i + ": sink refused");
+      if (i % 50 === 0) log("  " + i + "/" + c.frames);
+      if (i % 5 === 0) await new Promise((r) => setTimeout(r, 0));
+    }
+    log("  " + dir + " done");
+  }
+  log("ALL FOUR CLIPS DONE");
+  return "ok";
+};
+
+/**
+ * Render a handful of representative frames only.
+ *
+ * Marc, 2026-09-08: "we can also have in this folder here .../stills - just one
+ * or two frames so that not the whole video needs to be rerendered as we might
+ * want to do more graphical adjustments."
+ *
+ * ⚠️ THE DEFAULTS ARE ONE FRAME PER GROUND PLUS ONE MID-MORPH. A still of every
+ * held state shows the six surfaces; the mid-morph one is there because that is
+ * where the drawing has always broken — the water flicker lived at u = 0.995 and
+ * never appeared in any held frame.
+ */
+window.stills = async (times) => {
+  await boot();
+  const span = HOLD + MOVE;
+  const ts = times || [
+    ...ORDER.slice(0, 6).map((_, i) => i * span + HOLD * 0.5),   // each ground
+    span + HOLD + MOVE * 0.5,                                    // mid-morph
+    span * 2 - 0.12,                                             // just before a stop
+  ];
+  log("stills at t = " + ts.map((t) => t.toFixed(2)).join(", "));
+  for (const t of ts) {
+    frameAt(t);
+    const res = await fetch("/frame", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "still_t" + t.toFixed(2).replace(".", "-") + ".png",
+        png: cv.toDataURL("image/png"), dir: "stills",
+      }),
+    });
+    if (!res.ok) throw new Error("sink refused t=" + t);
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  log("stills done -> output/video/frames/stills/");
+  return "ok";
+};
+
+/**
+ * The same loop at 3840 x 2160.
+ *
+ * ⚠️ IT GOES TO ITS OWN FRAME DIRECTORY. Writing 4K frames over the 1080p ones
+ * would leave a directory whose contents depend on which render ran last, and
+ * the encode reads a glob — the exact shape of the stale-file trap this phase
+ * kept walking into.
+ */
+window.render4K = async (outDir) => {
+  const OUT = outDir || "morph4k";
+  await boot();
+  setScale(2);
+  const total = Math.round(DURATION * FPS);
+  log("4K: rendering " + total + " frames at " + (W * 2) + "x" + (H * 2));
+  const t0 = performance.now();
+  try {
+    for (let i = 0; i < total; i++) {
+      frameAt(i / FPS);
+      const png = cv.toDataURL("image/png");
+      let ok = false;
+      for (let a = 0; a < 3 && !ok; a++) {
+        try {
+          const res = await fetch("/frame", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              name: "frame_" + String(i).padStart(5, "0") + ".png",
+              png, dir: OUT,
+            }),
+          });
+          ok = res.ok;
+        } catch { /* transient */ }
+        if (!ok) await new Promise((r) => setTimeout(r, 200 * (a + 1)));
+      }
+      if (!ok) throw new Error("4K frame " + i + ": sink refused");
+      if (i % 25 === 0) {
+        const el2 = (performance.now() - t0) / 1000;
+        log("4K " + i + "/" + total + "  " + el2.toFixed(0) + "s, ~"
+          + ((el2 / (i + 1)) * (total - i - 1)).toFixed(0) + "s left");
+      }
+      if (i % 4 === 0) await new Promise((r) => setTimeout(r, 0));
+    }
+    log("4K DONE — " + total + " frames -> output/video/frames/" + OUT + "/");
+  } finally {
+    setScale(1);            // always hand the page back at 1080p
+  }
+  return "ok";
+};
+
+/**
+ * The Full HD loop, REDRAWN AT 1x into its own directory.
+ *
+ * ⚠⚠ THIS IS NOT THE 4K FILE DOWNSCALED, AND THAT WAS MEASURED, NOT ASSUMED.
+ * Deriving 1920x1080 from the 4K frames with a Lanczos halving looks like the
+ * better route — 2x supersampling usually beats a native pass — but the
+ * filmstrip thumbnails are ALREADY a downsample: a 1280x720 offscreen squeezed
+ * into a 74 px square. Halving the 4K makes that a SECOND downsample, and two
+ * in a row wash the 1 px contour lines from black to grey. Measured on the
+ * band: midtones fall from 9.2 % to 6.8 % and the thumbnails visibly grey out.
+ * One resampling, at the size it is shown. Never two.
+ *
+ * ⚠ ITS OWN DIRECTORY, like morph4k. Re-rendering into frames/morph/ would
+ * leave a directory whose contents depend on which pass ran last, and the
+ * encode reads a glob — the stale-file trap this phase kept walking into.
+ */
+/**
+ * ONE frame, at either scale, into frames/look/.
+ *
+ * ⚠ IT EXISTS BECAUSE THE ONLY WAYS TO SEE A FRAME WERE TO RENDER 1,150 OF
+ * THEM OR TO OVERWRITE AN EXISTING PASS. Both are how stale files and lost
+ * evidence got into this phase. A probe writes a NEW name into a scratch
+ * directory and touches nothing else.
+ *
+ *   await probe(23.04, "thumbs-after", 1)
+ *   await probe(23.04, "thumbs-after-4k", 2)
+ */
+window.probe = async (t, name, scale) => {
+  await boot();
+  const back = SS;
+  setScale(scale || 1);
+  try {
+    frameAt(t);
+    const res = await fetch("/frame", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "probe-" + name + ".png", png: cv.toDataURL("image/png"),
+        dir: "look",
+      }),
+    });
+    if (!res.ok) throw new Error("sink refused probe " + name);
+  } finally {
+    setScale(back);
+  }
+  log("probe -> output/video/frames/look/probe-" + name + ".png at "
+    + (W * (scale || 1)) + "x" + (H * (scale || 1)));
+  return "ok";
+};
+
+window.renderHD = async (outDir) => {
+  const OUT = outDir || "morphhd";
+  await boot();
+  setScale(1);
+  const total = Math.round(DURATION * FPS);
+  log("HD: rendering " + total + " frames at " + W + "x" + H);
+  const t0 = performance.now();
+  for (let i = 0; i < total; i++) {
+    frameAt(i / FPS);
+    const png = cv.toDataURL("image/png");
+    let ok = false;
+    for (let a = 0; a < 3 && !ok; a++) {
+      try {
+        const res = await fetch("/frame", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: "frame_" + String(i).padStart(5, "0") + ".png",
+            png, dir: OUT,
+          }),
+        });
+        ok = res.ok;
+      } catch { /* transient */ }
+      if (!ok) await new Promise((r) => setTimeout(r, 200 * (a + 1)));
+    }
+    if (!ok) throw new Error("HD frame " + i + ": sink refused");
+    if (i % 25 === 0) {
+      const el2 = (performance.now() - t0) / 1000;
+      log("HD " + i + "/" + total + "  " + el2.toFixed(0) + "s, ~"
+        + ((el2 / (i + 1)) * (total - i - 1)).toFixed(0) + "s left");
+    }
+    if (i % 5 === 0) await new Promise((r) => setTimeout(r, 0));
+  }
+  log("HD DONE — " + total + " frames -> output/video/frames/" + OUT + "/");
+  return "ok";
+};
+
+log("press “draw one frame” to start. duration " + DURATION.toFixed(1)
+  + " s, " + Math.round(DURATION * FPS) + " frames.");
+</script>

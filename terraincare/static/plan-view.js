@@ -107,7 +107,9 @@ export class PlanOverlay {
     this.draftGroup = new THREE.Group();
     /** the guide curve — a centreline, not a boundary */
     this.guideGroup = new THREE.Group();
-    this.group.add(this.regionGroup, this.draftGroup, this.guideGroup);
+    /** placed attractor points — objects in their own right, not vertices */
+    this.pointGroup = new THREE.Group();
+    this.group.add(this.regionGroup, this.draftGroup, this.guideGroup, this.pointGroup);
 
     /** @type {THREE.Material[]} */
     this._materials = [];
@@ -127,12 +129,23 @@ export class PlanOverlay {
     this._guideLine = this._makeLine(INK, 0.95);
     this._guideEdge = this._makeLine(INK, 0.35);
     this._guideHandles = this._makePoints(INK, 9);
+    // ⚠️ BIGGER THAN A VERTEX HANDLE, because it is not one. A guide handle is
+    // part of a line and is read as "drag me"; an attractor point IS the
+    // geometry, and two marks of the same size would say they were the same
+    // kind of thing — the mistake the pond and photo pins already record.
+    this._pointHandles = this._makePoints(INK, 13);
   }
 
   _makeLine(color, opacity) {
     const m = new THREE.LineBasicMaterial({
       color, transparent: true, opacity,
-      depthTest: false, depthWrite: false, fog: false,
+      // ⚠️ DEPTH-TESTED (2026-09-27, Marc: "fix the other overlays for the
+      // tilted view"). Off is right for a PLAN overlay — looking straight down
+      // nothing occludes anything — and wrong the moment the camera tilts, where
+      // linework showing through the ridge in front of it stops being a reading
+      // and becomes noise. Safe here because this overlay already lifts itself
+      // clear of the surface; the ones that do not keep the flag they have.
+      depthTest: true, depthWrite: false, fog: false,
     });
     this._materials.push(m);
     return m;
@@ -141,7 +154,7 @@ export class PlanOverlay {
   _makePoints(color, sizeCss) {
     const m = new THREE.PointsMaterial({
       color, size: sizeCss * this.pixelRatio, sizeAttenuation: false,
-      transparent: true, depthTest: false, depthWrite: false, fog: false,
+      transparent: true, depthTest: true, depthWrite: false, fog: false,
     });
     this._materials.push(m);
     return m;
@@ -153,7 +166,7 @@ export class PlanOverlay {
       // DoubleSide because the plate is horizontal and a region levelled below
       // the camera's eye line is seen from underneath the moment the view
       // leaves plan. A one-sided plate would simply vanish there.
-      side: THREE.DoubleSide, depthTest: false, depthWrite: false, fog: false,
+      side: THREE.DoubleSide, depthTest: true, depthWrite: false, fog: false,
     });
     this._materials.push(m);
     return m;
@@ -317,6 +330,40 @@ export class PlanOverlay {
     this.guideGroup.add(h);
   }
 
+  /**
+   * Redraw the placed attractor points.
+   *
+   * Each is a standalone geometry: no line joins them, because they are not a
+   * polyline and drawing one would say they were. The nearest point governs a
+   * cell, which is what makes a scatter of them read as several attractors
+   * rather than as one shape.
+   *
+   * @param {number[][]} pts [[x, y], …] in map units
+   */
+  setPoints(pts) {
+    this._clear(this.pointGroup);
+    if (!pts || !pts.length) return;
+    // ⚠️⚠️ AT ITS OWN HEIGHT, NOT DRAPED ONTO THE GROUND. A placed point keeps
+    // the elevation it was placed at — see the note in attract.js — so draping
+    // it would hide the one thing that makes it an attractor: where it sits
+    // RELATIVE to the ground it is pulling. Draped, the mark would slide upward
+    // with the mound it just raised and the gesture would look like it had done
+    // nothing. Drawn at its own height, the ground visibly comes to meet it.
+    const xyz = new Float32Array(pts.length * 3);
+    for (let i = 0; i < pts.length; i++) {
+      const [x, y, z] = pts[i];
+      const [lx, ly] = this._local(x, y);
+      const zz = Number.isFinite(z) ? z : zAtWorld(this.dem, x, y);
+      xyz[i * 3] = lx;
+      xyz[i * 3 + 1] = ly;
+      xyz[i * 3 + 2] = (Number.isFinite(zz) ? zz : 0) + LIFT;
+    }
+    const h = new THREE.Points(this._positions(xyz), this._pointHandles);
+    h.frustumCulled = false;
+    h.renderOrder = 12;
+    this.pointGroup.add(h);
+  }
+
   /** @param {THREE.Group} g */
   _clear(g) {
     for (const child of g.children) {
@@ -329,6 +376,7 @@ export class PlanOverlay {
     this._clear(this.regionGroup);
     this._clear(this.draftGroup);
     this._clear(this.guideGroup);
+    this._clear(this.pointGroup);
     for (const m of this._materials) m.dispose();
     this._materials.length = 0;
   }
