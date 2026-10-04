@@ -2595,6 +2595,55 @@
       </label>
       <div class="meta" id="ex-solid-note"></div>
     </div>
+
+    <!-- ⚠️ A SEPARATE ROOM, AND IT STARTS LOCKED (Marc, 2026-10-04: "perhaps
+         you have to first activate that menu so it is not too confusing").
+         Everything else under Export answers "give me what I am looking at".
+         This answers a different question — "give me something a printer can
+         make" — and the answers differ: a model needs a floor, a thickness and
+         a decision about which way up it will be built, none of which belong
+         on the buttons above. Kept shut so the panel does not grow four
+         numbers for everyone who only wanted the mesh. -->
+    <details class="sub" id="sec-print">
+      <summary>3D printing<span class="sec-badge" id="b-print"></span></summary>
+      <div class="sub-body">
+        <p class="note">A printable model is not the same object as an export
+          for CAD. It has to be <b>closed</b> — a surface with an inside — and
+          it has to stand on something. Switch this on to build one.</p>
+        <button id="t-print" class="toggle">Off</button>
+        <div id="print-body" hidden>
+          <label class="field">
+            <span>Build from</span>
+            <select id="print-source">
+              <option value="surface" selected>the surface — smooth, as drawn</option>
+              <option value="voxels">the voxels — blocks, fused into one body</option>
+            </select>
+          </label>
+          <!-- ⚠️ NOT OPTIONAL, AND NOT ZERO. The floor sits this far BELOW the
+               lowest ground. At zero it sits exactly ON it, so every cell at
+               that height has no thickness at all — on flat ground the whole
+               body measures 0.0 m³ while still being closed and correctly
+               wound. The exporter refuses it rather than let that reach a
+               slicer. It is also what lets the model be laid on its back and
+               printed standing. -->
+          <label class="field">
+            <span>Base under the lowest ground</span>
+            <input type="number" id="print-base" min="0.1" max="500" step="0.5" value="2">
+          </label>
+          <label class="field">
+            <span>Vertical exaggeration</span>
+            <input type="number" id="print-ex" min="0.1" max="20" step="0.1" value="1">
+          </label>
+          <label class="check">
+            <input type="checkbox" id="print-one" checked>
+            <span>one single solid</span>
+          </label>
+          <button id="print-export"><b>Solid &middot; OBJ</b></button>
+          <div class="meta" id="print-note"></div>
+        </div>
+      </div>
+    </details>
+
     <div class="row">
       <button id="ex-layer-tif">Layer · GeoTIFF</button>
       <button id="ex-layer-jpg">Layer · figure</button>

@@ -88,8 +88,8 @@ import {
 } from "./plan.js";
 import { PlanOverlay } from "./plan-view.js";
 import { readShapefile, prjEpsg, overlapsTerrain } from "./export/shapefile-read.js";
-import { writeVoxelSolidOBJ, blockClasses, blockLevels, manifoldReport }
-  from "./export/solid.js";
+import { writeVoxelSolidOBJ, writeSurfaceSolidOBJ, blockClasses, blockLevels,
+  manifoldReport } from "./export/solid.js";
 import { writeGeoTIFF } from "./export/geotiff-write.js";
 import { writeOBJ, writeVoxelOBJ } from "./export/obj.js";
 import { composeFigure } from "./export/figure.js";
@@ -9050,6 +9050,105 @@ function bundleReadme(layers, triangles, voxelTris, ex, textureFile) {
 }
 
 $("ex-tif").addEventListener("click", () => { try { exportTerrainGeoTIFF(); } catch (e) { fail(e); } });
+/* ------------------------------------------------- a solid, for printing */
+
+/**
+ * The 3D-printing room: shut by default, and separate on purpose.
+ *
+ * Marc, 2026-10-04: "an export for 3D printing option … ideally it exports as
+ * one solid watertight mesh with welded vertices with correct normals … perhaps
+ * you have to first activate that menu so it is not too confusing."
+ *
+ * ⚠️ IT IS A DIFFERENT QUESTION FROM THE REST OF Export. Everything else here
+ * answers "give me what I am looking at"; this answers "give me something a
+ * printer can make", and the answers are not the same object. A printable body
+ * needs a floor, a thickness, and a decision about which way up it is built —
+ * three numbers that would be noise on the buttons above, for everyone who only
+ * wanted the mesh.
+ */
+function syncPrintUI() {
+  const on = $("t-print").classList.contains("on");
+  $("t-print").textContent = on ? "On" : "Off";
+  $("print-body").hidden = !on;
+  $("b-print").textContent = on ? "armed" : "";
+}
+$("t-print").addEventListener("click", () => {
+  $("t-print").classList.toggle("on");
+  syncPrintUI();
+});
+syncPrintUI();
+
+function exportPrintSolid() {
+  const dem = state.dem;
+  if (!dem) { status("load a terrain before exporting a solid"); return; }
+  const src = /** @type {HTMLSelectElement} */ ($("print-source")).value;
+  const base = parseFloat(/** @type {HTMLInputElement} */ ($("print-base")).value);
+  const ex = parseFloat(/** @type {HTMLInputElement} */ ($("print-ex")).value) || 1;
+  const one = /** @type {HTMLInputElement} */ ($("print-one")).checked;
+  const note = $("print-note");
+
+  let res, stem, snapped = null;
+  if (src === "voxels") {
+    // ⚠️ THE LIVE FIELD IF THERE IS ONE, so the export is the staircase on
+    // screen rather than a second quantisation of the same ground — the trap
+    // already named where buildMesh calls this.
+    const live = state.representation === "voxel" ? state.surface : null;
+    const field = live || new VoxelField(dem, {
+      verticalExaggeration: ex, blockCells: state.blockCells ?? undefined,
+    });
+    const viewEx = currentExaggeration();
+    if (live && live.exaggeration !== ex) live.setExaggeration(ex);
+    const q = field.voxelHeight;
+    // ⚠️⚠️ THE PLINTH IS SNAPPED TO WHOLE CUBES. blockLevels quantises every
+    // column against baseZ, so lowering the floor by a fraction of a cube
+    // shifts every step by that fraction — the model keeps its height and
+    // changes its shape, which is the one thing an export must not do. Snapped
+    // and reported, so the number on screen is the number in the file.
+    const levels = Math.max(1, Math.round(base / q));
+    snapped = levels * q;
+    res = writeVoxelSolidOBJ(dem, {
+      blockCells: field.blockCells,
+      baseZ: field.baseZ - snapped,
+      quantum: q,
+      exaggeration: ex,
+      groups: null,          // the printing room always builds ONE body
+      layerLabel: "solid for printing",
+    });
+    if (live && live.exaggeration !== viewEx) live.setExaggeration(viewEx);
+    if (!live) field.dispose();
+    stem = "voxel-solid";
+  } else {
+    res = writeSurfaceSolidOBJ(dem, {
+      exaggeration: ex, baseThickness: base, layerLabel: "solid for printing",
+    });
+    stem = "surface-solid";
+  }
+
+  download(new Blob([res.obj], { type: "text/plain" }), `${exportStem(stem)}.obj`);
+
+  // ⚠️ REPORT WHAT WAS WRITTEN, NOT WHAT WAS INTENDED. "Watertight" is a
+  // property of the file and the only one a reader cannot check by looking.
+  const closed = res.report ? res.report.closed : res.closed;
+  const nonManifold = res.report ? res.report.duplicated : res.nonManifold;
+  const size = res.size
+    ? ` · ${res.size.map((v) => v.toFixed(1)).join(" × ")} m`
+    : "";
+  const words = `${closed ? "closed" : "⚠️ NOT CLOSED"} · `
+    + `${res.triangles.toLocaleString()} triangles · `
+    + `${res.vertices.toLocaleString()} welded vertices${size}`
+    + (nonManifold ? ` · ⚠️ ${nonManifold} knife edges` : "")
+    + (snapped !== null && Math.abs(snapped - base) > 1e-9
+      ? ` · base snapped to ${snapped.toFixed(2)} m, a whole number of cubes`
+      : "")
+    + (ex === 1 ? " · true elevations" : ` · ${ex}× exaggerated`);
+  note.textContent = words;
+  status(`${src === "voxels" ? "Voxel" : "Surface"} solid exported · ${words}`, 9000);
+}
+
+$("print-export").addEventListener("click", () => {
+  try { exportPrintSolid(); } catch (e) { fail(e); }
+});
+
 $("ex-obj").addEventListener("click", () => { try { exportTerrainOBJ(); } catch (e) { fail(e); } });
 $("ex-layer-tif").addEventListener("click", () => { exportLayerGeoTIFF(); });
 $("ex-layer-jpg").addEventListener("click", () => { try { exportLayerFigure(); } catch (e) { fail(e); } });

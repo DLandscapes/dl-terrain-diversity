@@ -41,7 +41,7 @@ import { writeGeoTIFF } from "./export/geotiff-write.js";
 import { writeOBJ, writeVoxelOBJ } from "./export/obj.js";
 import { makeZip } from "./export/zip.js";
 import { scaleBarLength } from "./export/figure.js";
-import { writeVoxelSolidOBJ, blockLevels, manifoldReport } from "./export/solid.js";
+import { writeSurfaceSolidOBJ, writeVoxelSolidOBJ, blockLevels, manifoldReport } from "./export/solid.js";
 import { geomorphons, LANDFORMS } from "./analysis/geomorphons.js";
 import { RULE_LAYERS, maskFromRule, maskRect, describeRules } from "./rules.js";
 import { inBand, bandFromCentre, bandShare } from "./band.js";
@@ -1489,6 +1489,128 @@ export async function runSuite(fetchTile) {
         `ln(${SPECIES.length}) = ${Math.log(SPECIES.length).toFixed(4)}`,
         SHANNON_MAX.toFixed(4), near(SHANNON_MAX, Math.log(SPECIES.length), 1e-12));
     }
+  }
+
+  const X10 = "X10 · the surface as a body a printer can actually make";
+  {
+    /**
+     * Marc, 2026-10-04: "an export for 3D printing … ideally it exports as one
+     * solid watertight mesh with welded vertices with correct normals."
+     *
+     * ⚠️⚠️ EVERY DEFECT THIS GROUP LOOKS FOR IS INVISIBLE ON SCREEN. An open
+     * shell, inward normals, two vertices a float apart at the same corner —
+     * all of them render perfectly and none of them print. The surface export
+     * was an open sheet of triangles with no thickness, which is right for
+     * Rhino and useless to a slicer, because there is no way to tell which side
+     * of an infinitely thin sheet is inside.
+     *
+     * The audit is done on the OBJ TEXT, parsed back, rather than on the arrays
+     * that produced it — the file is what a printer gets.
+     */
+    const mkDem = (nrows, ncols, cell, f) => {
+      const z = new Float32Array(nrows * ncols);
+      for (let r = 0; r < nrows; r++) {
+        for (let c = 0; c < ncols; c++) z[r * ncols + c] = f(r, c);
+      }
+      return { z, nrows, ncols, cell, originX: 0, originY: 0, name: "x10",
+        crs: null, epsg: null };
+    };
+    /** Read the OBJ back and measure it the way a slicer would. */
+    const audit = (obj) => {
+      const verts = [], faces = [];
+      for (const line of obj.split("\n")) {
+        if (line.startsWith("v ")) {
+          verts.push(line.slice(2).trim().split(/\s+/).map(Number));
+        } else if (line.startsWith("f ")) {
+          faces.push(line.slice(2).trim().split(/\s+/)
+            .map((t) => Number(t.split("/")[0]) - 1));
+        }
+      }
+      const dir = new Map();
+      for (const [a, b, c] of faces) {
+        for (const [u, v] of [[a, b], [b, c], [c, a]]) {
+          dir.set(`${u}>${v}`, (dir.get(`${u}>${v}`) || 0) + 1);
+        }
+      }
+      let unpaired = 0, twice = 0;
+      for (const [key, n] of dir) {
+        if (n > 1) twice++;
+        const [u, v] = key.split(">");
+        if (!dir.has(`${v}>${u}`)) unpaired++;
+      }
+      // signed volume: positive only when the winding faces outward
+      let vol = 0;
+      for (const [a, b, c] of faces) {
+        const P = verts[a], Q = verts[b], R = verts[c];
+        vol += (P[0] * (Q[1] * R[2] - Q[2] * R[1])
+              - P[1] * (Q[0] * R[2] - Q[2] * R[0])
+              + P[2] * (Q[0] * R[1] - Q[1] * R[0])) / 6;
+      }
+      const spots = new Set(verts.map((v) => v.map((n) => n.toFixed(4)).join(",")));
+      return { verts: verts.length, faces: faces.length, unpaired, twice, vol,
+        coincident: verts.length - spots.size };
+    };
+
+    const bump = mkDem(20, 20, 1, (r, c) =>
+      10 + 4 * Math.exp(-(((r - 10) ** 2 + (c - 10) ** 2) / 20)));
+    const a = audit(writeSurfaceSolidOBJ(bump, { baseThickness: 2 }).obj);
+
+    add(X10, "the exported surface is CLOSED — every directed edge is answered "
+      + "by its opposite, which is what gives the body an inside at all",
+      "0 unpaired edges", `${a.unpaired} unpaired of ${a.faces * 3}`, a.unpaired === 0);
+
+    // ⚠️ THE ROW THAT CAUGHT THE REAL BUG. Written the obvious way round, the
+    // walls ran along each rim edge in the SAME direction as the top triangle,
+    // so the edge paired with nothing and every wall normal pointed inward: on
+    // an 8×8 plane, 56 unpaired edges and a NEGATIVE volume. It renders
+    // perfectly and prints inside out.
+    add(X10, "…and wound OUTWARD, measured as a positive signed volume rather "
+      + "than trusted — a wall built along its rim edge the obvious way round "
+      + "faces inward and still looks right on screen",
+      "volume > 0", `${a.vol.toFixed(1)} m³`, a.vol > 0);
+
+    add(X10, "…with every vertex WELDED — no two at one position, because two "
+      + "corners a float apart read to a slicer as a crack",
+      "0 coincident", `${a.coincident} coincident`, a.coincident === 0);
+
+    add(X10, "…and no edge used twice the same way, so the shell is manifold "
+      + "and not two surfaces sharing a seam",
+      "0 doubled", `${a.twice} doubled`, a.twice === 0);
+
+    // ⚠️ A HOLE IN THE DATA IS A HOLE IN THE TOP, AND IT HAS TO CLOSE ITSELF.
+    // The floor is the top's own triangulation mirrored, so it has the same
+    // outline; the rim of a nodata patch is a boundary like any other and grows
+    // the same wall. The alternative is inventing ground.
+    const holed = mkDem(16, 16, 1, (r, c) =>
+      (r > 5 && r < 10 && c > 5 && c < 10) ? NaN : 8 + 0.2 * r);
+    const h = audit(writeSurfaceSolidOBJ(holed, { baseThickness: 2 }).obj);
+    add(X10, "a terrain with a NODATA hole still closes — the hole's rim grows "
+      + "walls like the outer edge, rather than the export inventing ground to "
+      + "fill it",
+      "closed, outward, welded",
+      `${h.unpaired} unpaired · ${h.vol > 0 ? "outward" : "INWARD"} · `
+      + `${h.coincident} coincident`,
+      h.unpaired === 0 && h.vol > 0 && h.coincident === 0);
+
+    // ⚠️ AND THE FLOOR MUST NOT SIT ON THE GROUND. At zero thickness it lands
+    // exactly at the lowest cell, so every cell at that height has no thickness:
+    // on flat ground the body is closed, correctly wound, and 0.0 m³.
+    let refused = false;
+    try { writeSurfaceSolidOBJ(bump, { baseThickness: 0 }); }
+    catch { refused = true; }
+    add(X10, "a base thickness of zero is REFUSED — the floor would sit on the "
+      + "lowest ground, giving that cell no thickness at all and, on flat "
+      + "ground, a closed body of 0.0 m³",
+      "refused", refused ? "refused" : "BUILT IT ANYWAY", refused);
+
+    // the plinth is material, and exactly as much as asked for
+    const v1 = audit(writeSurfaceSolidOBJ(bump, { baseThickness: 1 }).obj).vol;
+    const v3 = audit(writeSurfaceSolidOBJ(bump, { baseThickness: 3 }).obj).vol;
+    const footprint = (bump.ncols - 1) * (bump.nrows - 1) * bump.cell * bump.cell;
+    add(X10, "…and the base adds exactly its own slab: two more metres under a "
+      + "19 × 19 m footprint is 722 m³ more material, not approximately",
+      `${(footprint * 2).toFixed(1)} m³`, `${(v3 - v1).toFixed(1)} m³`,
+      Math.abs((v3 - v1) - footprint * 2) < 1e-6);
   }
 
   const X9 = "X9 · a band of a layer — read it, then select exactly what was read";

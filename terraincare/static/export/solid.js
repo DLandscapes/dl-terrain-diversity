@@ -204,6 +204,194 @@ function shell(inSet, levels, bRows, bCols, pool, g) {
 }
 
 /**
+ * THE SMOOTH SURFACE AS A CLOSED, PRINTABLE BODY — the terrain with sides and a
+ * floor, rather than the open sheet `writeOBJ` writes.
+ *
+ * `writeOBJ` exports the surface as it is drawn: a single layer of triangles
+ * with no thickness. That is the right thing for Rhino or Blender and the wrong
+ * thing for a slicer, which has no way to tell which side of an infinitely thin
+ * sheet is inside. This builds the same surface and closes it.
+ *
+ * ⚠️ THE TOP IS THE MESH THAT WAS ON SCREEN, VERTEX FOR VERTEX. Same cell-centre
+ * grid, same anti-diagonal split as `writeOBJ` and `surface.js`. Re-triangulating
+ * "equivalently" would hand the printer a model that is not the one the designer
+ * judged — and on a terrain of 0.25 m cells the difference is visible.
+ *
+ * ⚠️ WATERTIGHT BY CONSTRUCTION, NOT BY REPAIR. The floor is the top's OWN
+ * triangulation mirrored downward, so it has exactly the same outline — then
+ * every edge used by only one top triangle gets a vertical wall. Holes in the
+ * data therefore close themselves: a nodata patch is a hole in the top, its rim
+ * is a boundary, and the rim grows walls like any other. Filling nodata with an
+ * invented height would have been the alternative, and it invents ground.
+ *
+ * ⚠️ EVERY VERTEX IS SHARED. Positions are pooled, so the wall that meets the
+ * top uses the top's own vertex rather than a second one at the same
+ * coordinates. Two vertices a float apart read as a crack to a slicer and are
+ * the usual reason a visually perfect mesh prints with a seam.
+ *
+ * ⚠️ THE FLOOR IS FLAT AND THE MODEL CAN STAND ON IT. `baseThickness` is
+ * material added BELOW the lowest ground, so a terrain whose lowest point is a
+ * knife edge still has a slab to sit on — and a slab is also what lets the model
+ * be laid on its back and printed standing, which is what it is for.
+ *
+ * @param {import("../dem.js").DEM} dem
+ * @param {{exaggeration?: number, baseThickness?: number, layerLabel?: string}} [opts]
+ * @returns {{obj: string, triangles: number, vertices: number, shells: number,
+ *            report: ReturnType<typeof manifoldReport>, minZ: number, baseZ: number,
+ *            size: [number, number, number], dropped: number}}
+ */
+export function writeSurfaceSolidOBJ(dem, opts = {}) {
+  const { z, nrows, ncols, cell } = dem;
+  const ex = opts.exaggeration ?? 1;
+  const thickness = Math.max(0, opts.baseThickness ?? 0);
+  const northY = nrows * cell;
+
+  let minZ = Infinity, maxZ = -Infinity;
+  for (let i = 0; i < z.length; i++) {
+    const v = z[i];
+    if (!Number.isFinite(v)) continue;
+    if (v < minZ) minZ = v;
+    if (v > maxZ) maxZ = v;
+  }
+  if (!Number.isFinite(minZ)) {
+    throw new Error("the terrain has no finite heights — nothing to build a solid from");
+  }
+  // ⚠️⚠️ A FLOOR LEVEL WITH THE LOWEST GROUND IS NOT A SOLID. With no base the
+  // floor sits exactly at the lowest cell, so every cell AT that height has its
+  // top and bottom vertex in the same place: a zero-thickness sliver, which a
+  // slicer either drops or prints as a stray film. On flat ground the whole body
+  // degenerates — measured on an 8x8 plane: closed, manifold, correctly wound,
+  // and 0.0 m³ of material. Refused here rather than discovered on the printer.
+  if (!(thickness > 0)) {
+    throw new Error(
+      "a printable solid needs material under its lowest point — set a base "
+      + "thickness above 0. With none, the floor touches the ground at the "
+      + "lowest cell and the model has no thickness there."
+    );
+  }
+  const baseZ = minZ * ex - thickness;
+
+  // ── the vertex pool: one entry per (cell, layer), created on demand ─────
+  /** @type {Map<number, number>} */ const pool = new Map();
+  /** @type {number[][]} */ const verts = [];
+  /** the DEM cell each vertex came from, so the floor twin is a lookup */
+  /** @type {number[]} */ const vertCell = [];
+  /** top = layer 0, floor = layer 1 */
+  const id = (i, layer) => {
+    const key = i * 2 + layer;
+    let v = pool.get(key);
+    if (v !== undefined) return v;
+    const r = (i / ncols) | 0, c = i % ncols;
+    verts.push([(c + 0.5) * cell, northY - (r + 0.5) * cell,
+      layer === 0 ? z[i] * ex : baseZ]);
+    vertCell.push(i);
+    v = verts.length - 1;
+    pool.set(key, v);
+    return v;
+  };
+  /**
+   * The floor vertex under a top vertex.
+   * ⚠️ BY LOOKUP, NOT BY ROUNDING THE POSITION BACK TO A CELL. Recovering the
+   * cell from x/y works until a cell size makes the division land on .4999,
+   * and then one vertex of one wall quietly attaches to its neighbour.
+   */
+  const floorOf = (v) => id(vertCell[v], 1);
+
+  /** @type {number[][]} */ const tris = [];
+  const finite = (i) => Number.isFinite(z[i]);
+  let dropped = 0;
+
+  // ── the top, exactly as writeOBJ splits it ─────────────────────────────
+  // Wound counter-clockwise seen from above, so the outward normal is +Z and
+  // the floor and walls below can take their orientation from it.
+  for (let r = 0; r < nrows - 1; r++) {
+    for (let c = 0; c < ncols - 1; c++) {
+      const a = r * ncols + c, b = a + 1, d = a + ncols, e = d + 1;
+      if (finite(a) && finite(d) && finite(b)) tris.push([id(a, 0), id(d, 0), id(b, 0)]);
+      else dropped++;
+      if (finite(b) && finite(d) && finite(e)) tris.push([id(b, 0), id(d, 0), id(e, 0)]);
+      else dropped++;
+    }
+  }
+  if (!tris.length) {
+    throw new Error("no complete cell in this terrain — the surface has no triangles to close");
+  }
+  const topCount = tris.length;
+
+  // ── the floor: the same triangulation, mirrored down and reversed ──────
+  for (let t = 0; t < topCount; t++) {
+    const [a, b, c] = tris[t];
+    tris.push([floorOf(a), floorOf(c), floorOf(b)]);
+  }
+
+  // ── the walls: every edge the top uses only once ───────────────────────
+  // An edge with no opposite twin is a rim — the outside of the tile, or the
+  // rim of a nodata hole. Both get the same wall, which is why holes need no
+  // special case.
+  /** @type {Set<string>} */ const topEdges = new Set();
+  for (let t = 0; t < topCount; t++) {
+    const [a, b, c] = tris[t];
+    topEdges.add(`${a}>${b}`); topEdges.add(`${b}>${c}`); topEdges.add(`${c}>${a}`);
+  }
+  let walls = 0;
+  for (const key of topEdges) {
+    const [us, vs] = key.split(">");
+    const u = +us, v = +vs;
+    if (topEdges.has(`${v}>${u}`)) continue;         // interior: two triangles share it
+    const ub = floorOf(u), vb = floorOf(v);
+    // ⚠️⚠️ THE WALL TRAVERSES THE RIM EDGE BACKWARDS — v -> u, not u -> v.
+    // Two faces sharing an edge must run along it in OPPOSITE directions, or
+    // the edge is used twice the same way and pairs with nothing: the body is
+    // open and every normal on that wall points inward. Written the obvious way
+    // round first, this produced 56 unpaired edges on an 8x8 plane and a
+    // NEGATIVE volume — a model that looks perfect on screen and prints inside
+    // out. The quad is v -> u -> u_floor -> v_floor.
+    tris.push([v, u, ub]);
+    tris.push([v, ub, vb]);
+    walls += 2;
+  }
+
+  // ── out ────────────────────────────────────────────────────────────────
+  const out = [];
+  out.push("# DL-TerrainDiversity — SOLID surface export (closed, for printing)");
+  out.push(`# source ${dem.name || "(unnamed)"}`);
+  out.push(`# grid ${ncols} x ${nrows} cells, ${cell} m`);
+  out.push(`# COORDINATES ARE LOCAL: add the origin below to place this in ${dem.crs || "the source file's own coordinate system"}.`);
+  out.push(`# origin_${dem.epsg ? `epsg${dem.epsg}` : "local"} ${dem.originX} ${dem.originY}`);
+  out.push("# up_axis Z");
+  out.push(ex === 1
+    ? "# vertical_exaggeration 1 (true elevations)"
+    : `# vertical_exaggeration ${ex} — Z IS NOT TRUE ELEVATION, divide by ${ex}`);
+  out.push(`# base_thickness ${thickness} (material below the lowest ground)`);
+  out.push(`# floor_z ${baseZ.toFixed(4)}`);
+  if (opts.layerLabel) out.push(`# layer ${opts.layerLabel}`);
+  out.push("# Terrain data (c) Kartverket, hoydedata.no, NLOD / CC BY 4.0");
+  out.push("o terrain_solid");
+  for (const [x, y, zz] of verts) {
+    out.push(`v ${x.toFixed(4)} ${y.toFixed(4)} ${zz.toFixed(4)}`);
+  }
+  for (const [a, b, c] of tris) out.push(`f ${a + 1} ${b + 1} ${c + 1}`);
+
+  const report = manifoldReport(tris);
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const [x, y] of verts) {
+    if (x < x0) x0 = x; if (x > x1) x1 = x;
+    if (y < y0) y0 = y; if (y > y1) y1 = y;
+  }
+  return {
+    obj: out.join("\n") + "\n",
+    triangles: tris.length,
+    vertices: verts.length,
+    shells: 1,
+    report,
+    minZ,
+    baseZ,
+    size: [x1 - x0, y1 - y0, maxZ * ex - baseZ],
+    dropped,
+  };
+}
+
+/**
  * The voxel terrain as one or more watertight solids, in OBJ.
  *
  * @param {import("../dem.js").DEM} dem
