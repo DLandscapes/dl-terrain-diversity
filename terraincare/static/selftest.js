@@ -954,6 +954,43 @@ export async function runSuite(fetchTile) {
       "sign inversions are unreachable by restyling",
       "0 flipped", flipped ? names.join(", ") : "0 flipped", flipped === 0);
 
+    // ⚠️ …AND THE ONE SANCTIONED WAY TO INVERT, kept beside the rule it bends.
+    // From 2026-10-04 the legend's handles MAY be dragged past each other,
+    // which reverses the ramp. That is not a loophole in the row above —
+    // restyling still cannot do it — it is a deliberate act by the reader, and
+    // it is allowed on one condition: the inversion announces itself, in the
+    // legend, in the status line, and in the title and swatch of any exported
+    // figure. The ban was never on the inversion; it was on an inversion
+    // nobody could see. What is testable here is the mechanism it rests on.
+    {
+      const dom = /** @type {any} */ ([0, 10]);
+      const rev = /** @type {any} */ ([10, 0]);
+      let worst = 0;
+      for (let i = 0; i <= 10; i++) {
+        const fwd = sample("slope", i, dom);
+        const back = sample("slope", 10 - i, rev);
+        for (let c = 0; c < 3; c++) worst = Math.max(worst, Math.abs(fwd[c] - back[c]));
+      }
+      add(M, "handing a ramp its domain backwards mirrors it exactly — this is "
+        + "what an inverted ramp IS, so a reversed legend and a reversed map "
+        + "cannot drift apart",
+        "0 channel difference", `${worst} worst channel difference`, worst === 0);
+
+      const g = new Float32Array([0, 2.5, 5, 7.5, 10]);
+      const fwdPx = colourise("slope", g, dom);
+      const revPx = colourise("slope", g, rev);
+      let mirrored = true;
+      for (let i = 0; i < g.length; i++) {
+        const j = g.length - 1 - i;
+        for (let c = 0; c < 3; c++) {
+          if (fwdPx[i * 4 + c] !== revPx[j * 4 + c]) mirrored = false;
+        }
+      }
+      add(M, "…and a whole grid colourised through the reversed domain is the "
+        + "forward colouring read back to front, cell for cell",
+        "mirrored", mirrored ? "mirrored" : "NOT mirrored", mirrored);
+    }
+
     add(M, "a variant never changes the NUMBER or POSITION of stops, so it " +
       "cannot reorder a ramp",
       "same positions",

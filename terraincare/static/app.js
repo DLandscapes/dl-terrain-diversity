@@ -606,6 +606,20 @@ const DEFAULT_CUTS = {
  */
 const stretchPlacers = [];
 function refreshStretchHandles() { for (const p of stretchPlacers) p.fn(); }
+/**
+ * Is this layer's ramp running backwards?
+ *
+ * ⚠️ ONE DEFINITION, because the answer has to be the same in the legend, in
+ * the status line and in every exported figure. An inversion that the screen
+ * knows about and a printed sheet does not is the exact failure the crossing
+ * ban used to prevent.
+ * @param {string} k
+ */
+function rampInverted(k) {
+  const s = state.stretch[k];
+  return !!s && s[0] > s[1];
+}
+
 /** @param {Element} el */
 function dropPlacersFor(el) {
   for (let i = stretchPlacers.length - 1; i >= 0; i--) {
@@ -910,10 +924,39 @@ function addStretchHandles(el, k) {
         const f = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
         const cur = state.stretch[k] || DEFAULT_CUTS[k].slice();
         const next = cur.slice();
-        // Keep a visible gap: coincident cuts give a zero-width domain, which
-        // percentileDomain rejects and which would read as the layer vanishing.
-        if (which === 0) next[0] = Math.min(f, next[1] - 0.02);
-        else next[1] = Math.max(f, next[0] + 0.02);
+        // ⚠️ THE HANDLES MAY NOW CROSS, WHICH INVERTS THE RAMP (Marc,
+        // 2026-10-04). They used to be pinned to their own halves precisely so
+        // they could not — the palette variants are built so that no restyling
+        // can reverse which end is warm, and the handles were not allowed to
+        // reintroduce it. Crossing is permitted on one condition, kept in
+        // fillLegend: an inverted ramp SAYS SO, on screen and on anything
+        // exported. The guard was never against the inversion, it was against
+        // an inversion nobody could see.
+        //
+        // Coincident cuts are still refused: a zero-width domain is rejected by
+        // percentileDomain and reads as the layer vanishing. Dragging INTO the
+        // other handle parks beside it; dragging PAST it lands a gap beyond, so
+        // the crossing is a deliberate push rather than a twitch.
+        // ⚠️ THE DRAGGED HANDLE GOES WHERE IT IS PUT; THE OTHER ONE GIVES WAY.
+        // The first version kept both inside the bar and pushed the DRAGGED one
+        // off the far side of its neighbour — which cannot work where the
+        // neighbour already sits at 99 %, because "just past it" is 1.01, gets
+        // clamped back, and the crossing silently refuses. That is precisely
+        // where the default cuts put them, so crossing was impossible in the
+        // only state anyone starts from. Displacing the other handle is also
+        // what a reader sees and understands: the ramp end they are not holding
+        // steps aside.
+        const GAP = 0.02;
+        const o = which ^ 1;
+        next[which] = Math.min(1, Math.max(0, f));
+        if (Math.abs(next[which] - next[o]) < GAP) {
+          const side = next[o] >= next[which] ? 1 : -1;
+          next[o] = Math.min(1, Math.max(0, next[which] + side * GAP));
+          // the bar ran out on that side — give way inwards instead
+          if (Math.abs(next[which] - next[o]) < GAP) {
+            next[o] = Math.min(1, Math.max(0, next[which] - side * GAP));
+          }
+        }
         state.stretch[k] = next;
         place();
         pushView();
@@ -922,7 +965,8 @@ function addStretchHandles(el, k) {
         handle.removeEventListener("pointermove", move);
         handle.removeEventListener("pointerup", up);
         const [a, b] = state.stretch[k];
-        status(`${layerTitle(k)} stretched to ${(a * 100).toFixed(0)}–${(b * 100).toFixed(0)}%`);
+        status(`${layerTitle(k)} stretched to ${(a * 100).toFixed(0)}–${(b * 100).toFixed(0)}%`
+          + (a > b ? " — INVERTED, the ramp now runs backwards" : ""));
       };
       handle.addEventListener("pointermove", move);
       handle.addEventListener("pointerup", up);
@@ -993,12 +1037,20 @@ function fillLegend(el, k) {
   const [lo, hi] = dom;
 
   // Sample the ramp itself for the gradient, so the swatch is the ramp.
+  //
+  // ⚠️ AN INVERTED RAMP IS DRAWN INVERTED AND LABELLED INVERTED. This is the
+  // condition the handles were allowed to cross under: reversing the colours
+  // without reversing the bar would leave the legend describing a map that no
+  // longer exists, and a reader would trust the legend.
+  const inv = rampInverted(k);
+  const gdom = /** @type {any} */ (inv ? [hi, lo] : dom);
   const stops = [];
   for (let i = 0; i <= 12; i++) {
     const v = lo + ((hi - lo) * i) / 12;
-    const [r, g, b] = sample(k, v, /** @type {any} */ (dom), state.variant[k]);
+    const [r, g, b] = sample(k, v, gdom, state.variant[k]);
     stops.push(`rgb(${r},${g},${b}) ${(i / 12 * 100).toFixed(0)}%`);
   }
+  el.classList.toggle("inverted", inv);
   /** @type {HTMLElement} */ (el.querySelector(".bar"))
     .style.background = `linear-gradient(90deg, ${stops.join(",")})`;
 
@@ -1034,8 +1086,19 @@ function fillLegend(el, k) {
     const dp = meta.log10 && raw < 10 ? 2 : meta.dp;
     return `${raw.toFixed(dp)}${meta.unit}`;
   };
-  ends[0].innerHTML = meta.circular ? `<b>N</b> 0°` : `<b>${meta.lo}</b> ${fmt(lo)}`;
-  ends[1].innerHTML = meta.circular ? `360° <b>N</b>` : `${fmt(hi)} <b>${meta.hi}</b>`;
+  // The words follow the colours: with the ramp reversed, the left end of the
+  // bar is where the HIGH values now are, and saying "low" there would be the
+  // whole hazard in one label.
+  if (meta.circular) {
+    ends[0].innerHTML = `<b>N</b> 0°`;
+    ends[1].innerHTML = `360° <b>N</b>`;
+  } else if (inv) {
+    ends[0].innerHTML = `<b>${meta.hi}</b> ${fmt(hi)}`;
+    ends[1].innerHTML = `${fmt(lo)} <b>${meta.lo}</b>`;
+  } else {
+    ends[0].innerHTML = `<b>${meta.lo}</b> ${fmt(lo)}`;
+    ends[1].innerHTML = `${fmt(hi)} <b>${meta.hi}</b>`;
+  }
 }
 
 let statusTimer = 0;
@@ -8689,13 +8752,20 @@ function buildFigure(key) {
   const nominal = !categorical && !RAMPS[key];
   const dom = categorical || nominal
     ? [0, 1] : (state.domains[key] || RAMPS[key].domain);
+  const figInverted = !categorical && !nominal && rampInverted(key);
+  const figDom = figInverted ? [dom[1], dom[0]] : dom;
   const stops = [];
   if (!categorical && !nominal) {
     for (let i = 0; i <= 24; i++) {
       const v = dom[0] + ((dom[1] - dom[0]) * i) / 24;
       // The figure's ramp swatch must use the same variant the pixels did, or
       // the legend describes a palette the image is not drawn in.
-      const [r, g, b] = sample(key, v, /** @type {any} */ (dom), state.variant[key]);
+      //
+      // ⚠️ AND THE SAME DIRECTION. The handles may be crossed, which reverses
+      // the ramp; a swatch drawn the right way round beside a reversed map is
+      // the precise failure the crossing used to be banned to prevent — except
+      // on paper, where there is no handle to look at.
+      const [r, g, b] = sample(key, v, /** @type {any} */ (figDom), state.variant[key]);
       stops.push([r, g, b]);
     }
   }
@@ -8718,7 +8788,11 @@ function buildFigure(key) {
 
   const cv = composeFigure({
     rgba: buf, ncols: dem.ncols, nrows: dem.nrows, cellSize: dem.cell,
-    title: layerTitle(key),
+    // ⚠️ THE TITLE CARRIES THE INVERSION, because a printed figure has no
+    // handles to inspect. The swatch and the end labels below are already
+    // reversed to match the pixels; this is so a reader who glances at neither
+    // still cannot mistake which end is which.
+    title: layerTitle(key) + (figInverted ? " — ramp INVERTED" : ""),
     rampStops: stops,
     keys,
     // The rose is built from the SAME function the layer was computed with, so
@@ -8740,8 +8814,12 @@ function buildFigure(key) {
     // basin map would invite exactly the reading watershed.js warns against —
     // that the hue sequence is a rank — when the ids are arbitrary and the
     // colours walk the golden angle purely to separate neighbours.
-    loLabel: nominal ? "" : (meta?.circular ? "N 0°" : `${meta?.lo ?? "low"} ${fmt(dom[0])}`),
-    hiLabel: nominal ? "" : (meta?.circular ? "360° N" : `${fmt(dom[1])} ${meta?.hi ?? "high"}`),
+    loLabel: nominal ? "" : (meta?.circular ? "N 0°"
+      : figInverted ? `${meta?.hi ?? "high"} ${fmt(dom[1])}`
+        : `${meta?.lo ?? "low"} ${fmt(dom[0])}`),
+    hiLabel: nominal ? "" : (meta?.circular ? "360° N"
+      : figInverted ? `${fmt(dom[0])} ${meta?.lo ?? "low"}`
+        : `${fmt(dom[1])} ${meta?.hi ?? "high"}`),
     note: key === "watershed"
       // ⚠️ THE COLOURS MUST BE DECLARED ARBITRARY, in the figure and not only in
       // the app. Basins are ranked by area, so a reader handed this raster

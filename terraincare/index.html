@@ -943,6 +943,16 @@
   /* An adjusted layer says so in its panel label, so a tuned stretch is never
      invisible when you come back to the tool later. */
   .legend .handles.adjusted ~ .ends b::after { content: " ·adj"; color: var(--ink-soft); }
+  /* ⚠️ AN INVERTED RAMP SAYS SO, and says it on the bar rather than in a
+     tooltip. The handles were allowed to cross on exactly this condition: the
+     ban was never on the inversion, it was on an inversion nobody could see.
+     Louder than "·adj" because it changes what the map MEANS, not how it is
+     tuned. */
+  .legend.inverted .ends::after {
+    content: "inverted"; font-family: var(--font-head); font-size: .6rem;
+    letter-spacing: .04em; color: var(--sheet); background: var(--ink);
+    padding: 0 4px; border-radius: 2px; align-self: center; margin-left: 6px;
+  }
   /* The legend is inert so it cannot swallow clicks meant for the panel behind
      it; only the controls inside it take pointer events. The hover legend must
      also stay open while the pointer is on a handle, which it does because the

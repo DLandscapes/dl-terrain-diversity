@@ -37,7 +37,7 @@ It opens on a **synthetic flat plane**, not on survey data — see
 ## Test it
 
 ```bash
-node terraincare/static/_selftest.mjs     # 647 checks, headless
+node terraincare/static/_selftest.mjs     # 649 checks, headless
 ```
 
 The render suite is browser-only because it asserts on pixels and on the
@@ -55,7 +55,7 @@ identically in Node and in the browser, over the same modules the app loads.
 > exported sheets state a scale they are not drawn at. The rows were written to
 > fail against that named defect and stay red until the exporters are fixed — a
 > suite made green by loosening its own checks proves nothing, and the defect is
-> in the sheets, not in the test. The remaining **639 of 647 pass**, as do **165
+> in the sheets, not in the test. The remaining **641 of 649 pass**, as do **165
 > of 165** in the render suite. The scale *bars* on those sheets are already
 > correct; it is the printed ratio that overstates.
 
