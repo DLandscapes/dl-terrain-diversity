@@ -555,6 +555,18 @@ function refreshShadingLegend() {
     && (LEGEND[k].categorical || !!RAMPS[k]);
   $("shade-legend-row").hidden = !on;
   if (on) fillLegend($("shade-legend"), k);
+
+  // ⚠️ A SHADER'S OWN PARAMETER FOLLOWS ITS SHADER (Marc, 2026-10-04: "if you
+  // select another shader, other shader properties get visible"). The solar
+  // period governs ONE layer and sat in this panel permanently, so a reader
+  // looking at Aspect was offered a date range that changed nothing they could
+  // see — and the one layer it does govern gave no sign that it had a setting
+  // at all. It is the only per-shader parameter here; if a second one appears,
+  // this becomes a table rather than a third branch.
+  const solarField = $("solar-period").closest("label");
+  const solarOn = k === "solar";
+  if (solarField) /** @type {HTMLElement} */ (solarField).hidden = !solarOn;
+  $("solar-note").hidden = !solarOn;
 }
 
 function refreshLegend(k) {
