@@ -144,20 +144,39 @@ export const RAMPS = {
   },
   // Aspect: a full-saturation hue wheel, so opposing slopes are unmistakably
   // opposite. NaN must NOT land on the north hue — sample() guarantees that.
+  //
+  // ⚠️ ROTATED HALF A TURN ON 2026-10-04 (Marc: "north is per default red and
+  // south is bluish — that does not make sense"). He is right, and the reason
+  // is not taste: on a terrain map the hue is read as TEMPERATURE. The warm end
+  // belongs on the sunlit aspect, and putting red on the cold north face
+  // inverted the one thing a reader takes from an aspect map at a glance.
+  //
+  // The rotation keeps the wheel itself — same eight hues, same spacing, so
+  // opposing slopes still land on opposing hues — and only changes which
+  // bearing each hue sits on. It also puts the warm band on S-SW-W and the
+  // cool band on N-NE-E, which is where the heat actually is: the afternoon
+  // slope is the warm one, not the noon slope.
+  //
+  // ⚠️ THIS CONVENTION ASSUMES THE NORTHERN HEMISPHERE. The tool reads the
+  // CRS and derives a latitude for the sun, so it will happily open a raster
+  // from the south, where the sunlit aspect is NORTH and this wheel is exactly
+  // backwards. Stated rather than solved: flipping it with latitude would mean
+  // two maps of the same colours meaning opposite things, and nothing on the
+  // sheet would say which.
   aspect: {
     id: "aspect",
     domain: [0, 360],
     circular: true,
     stops: [
-      [0.0, [226, 74, 60]],     // N
-      [0.125, [236, 150, 44]],
-      [0.25, [226, 214, 52]],   // E
-      [0.375, [128, 202, 66]],
-      [0.5, [46, 176, 150]],    // S
-      [0.625, [50, 148, 214]],
-      [0.75, [96, 84, 200]],    // W
-      [0.875, [178, 70, 168]],
-      [1.0, [226, 74, 60]],     // back to N
+      [0.0, [46, 176, 150]],    // N  — cool
+      [0.125, [50, 148, 214]],
+      [0.25, [96, 84, 200]],    // E
+      [0.375, [178, 70, 168]],
+      [0.5, [226, 74, 60]],     // S  — warm, the sunlit aspect
+      [0.625, [236, 150, 44]],
+      [0.75, [226, 214, 52]],   // W
+      [0.875, [128, 202, 66]],
+      [1.0, [46, 176, 150]],    // back to N
     ],
   },
   // Ruggedness as a heat scale rather than earth tones: smooth ground drops
