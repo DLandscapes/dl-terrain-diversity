@@ -52,7 +52,7 @@ let lastGrids = null;
  * the panel and the 3D surface two different ideas of the same layer.
  * @type {{stretch: Record<string, number[]>, variant: Record<string, string>}}
  */
-let view = { stretch: {}, variant: {} };
+let view = { stretch: {}, variant: {}, isolate: {}, band: {} };
 /**
  * Landform classes from the last settled pass, as the Uint8 codes the species
  * model wants. lastGrids.geomorphon holds the same thing widened to float32 for
@@ -121,6 +121,33 @@ function flatDomain(z) {
 function cuts(key, lo, hi) {
   const s = view.stretch[key];
   return s ? [s[0], s[1]] : [lo, hi];
+}
+
+/**
+ * The band of values to SHOW for a layer, or null for "show everything".
+ *
+ * Two ways in, because two kinds of layer:
+ *
+ * - An explicit `band` comes from a layer whose range cannot be stretched, and
+ *   in practice that means ASPECT. A bearing has no low and high end to pull
+ *   in; a reader asking for "the south-facing slopes" is naming an ARC, which
+ *   is sent as [lo, hi] degrees and may wrap through north.
+ * - `isolate` on a stretchable layer reuses the range the handles already set.
+ *   Stretching and isolating are then the same gesture seen two ways: the
+ *   handles say which values matter, and this flag decides whether the rest is
+ *   CLAMPED to the ends of the ramp, as a GIS does, or dropped out of the
+ *   picture entirely. That is why isolating needs no second pair of handles.
+ *
+ * @param {string} key
+ * @param {[number,number]|number[]|undefined} dom the domain actually used
+ */
+function bandFor(key, dom) {
+  const b = view.band[key];
+  if (b && b.length === 2 && Number.isFinite(b[0]) && Number.isFinite(b[1])) {
+    return { lo: b[0], hi: b[1] };
+  }
+  if (view.isolate[key] && dom && dom.length === 2) return { lo: dom[0], hi: dom[1] };
+  return null;
 }
 
 /**
@@ -262,14 +289,14 @@ function runPass(seq, wantPanels, heavy = false) {
     };
     const V = (k) => view.variant[k];
     const panels = {
-      elevation: colourise("elevation", dem.z, dom.elevation, V("elevation")),
-      slope: colourise("slope", gradient.slopeDeg, dom.slope, V("slope")),
-      aspect: colourise("aspect", aspectDeg, undefined, V("aspect")),
-      twi: colourise("twi", twiGrid, dom.twi, V("twi")),
-      catchment: colourise("catchment", logCatchment, dom.catchment, V("catchment")),
-      cutfill: colourise("cutfill", delta, dom.cutfill, V("cutfill")),
-      tri: colourise("tri", triGrid, dom.tri, V("tri")),
-      depression: colourise("depression", depth, dom.depression, V("depression")),
+      elevation: colourise("elevation", dem.z, dom.elevation, V("elevation"), bandFor("elevation", dom.elevation)),
+      slope: colourise("slope", gradient.slopeDeg, dom.slope, V("slope"), bandFor("slope", dom.slope)),
+      aspect: colourise("aspect", aspectDeg, undefined, V("aspect"), bandFor("aspect", undefined)),
+      twi: colourise("twi", twiGrid, dom.twi, V("twi"), bandFor("twi", dom.twi)),
+      catchment: colourise("catchment", logCatchment, dom.catchment, V("catchment"), bandFor("catchment", dom.catchment)),
+      cutfill: colourise("cutfill", delta, dom.cutfill, V("cutfill"), bandFor("cutfill", dom.cutfill)),
+      tri: colourise("tri", triGrid, dom.tri, V("tri"), bandFor("tri", dom.tri)),
+      depression: colourise("depression", depth, dom.depression, V("depression"), bandFor("depression", dom.depression)),
     };
     msg.panels = panels;
     msg.domains = dom;
@@ -327,10 +354,10 @@ function runPass(seq, wantPanels, heavy = false) {
       svfGrid: svf,
       domains: hdom,
       panels: {
-        svf: colourise("svf", svf, hdom.svf, view.variant.svf),
-        openness: colourise("openness", openness, hdom.openness, view.variant.openness),
-        solar: colourise("solar", sun.grid, hdom.solar, view.variant.solar),
-        wind: colourise("wind", wind, hdom.wind, view.variant.wind),
+        svf: colourise("svf", svf, hdom.svf, view.variant.svf, bandFor("svf", hdom.svf)),
+        openness: colourise("openness", openness, hdom.openness, view.variant.openness, bandFor("openness", hdom.openness)),
+        solar: colourise("solar", sun.grid, hdom.solar, view.variant.solar, bandFor("solar", hdom.solar)),
+        wind: colourise("wind", wind, hdom.wind, view.variant.wind, bandFor("wind", hdom.wind)),
         // Classes, not a continuum — no domain, no stretch.
         geomorphon: colouriseClasses("geomorphon", gm.codes),
         // ⚠️ Its OWN colouriser, not colouriseClasses. Basin ids are nominal
@@ -536,6 +563,8 @@ self.onmessage = (e) => {
     view = {
       stretch: m.stretch || {},
       variant: m.variant || {},
+      isolate: m.isolate || {},
+      band: m.band || {},
     };
     if (!lastGrids || !dem) return;
     const t0 = performance.now();
@@ -578,9 +607,12 @@ self.onmessage = (e) => {
       const d = percentileDomain(g, ...cuts(k, ...DEFAULTS[k]), opt[k])
         ?? (k === "elevation" ? flatDomain(g) : undefined);
       domains[k] = d;
-      panels[k] = colourise(k, g, d, view.variant[k]);
+      panels[k] = colourise(k, g, d, view.variant[k], bandFor(k, d));
     }
-    if (lastGrids.aspect) panels.aspect = colourise("aspect", lastGrids.aspect, undefined, view.variant.aspect);
+    if (lastGrids.aspect) {
+      panels.aspect = colourise("aspect", lastGrids.aspect, undefined,
+        view.variant.aspect, bandFor("aspect", undefined));
+    }
     // @ts-ignore - worker global
     self.postMessage({ type: "recolour", seq: m.seq ?? 0, panels, domains,
       ms: performance.now() - t0 },

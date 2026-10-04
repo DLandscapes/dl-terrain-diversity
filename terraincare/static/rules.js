@@ -53,9 +53,19 @@ import { LANDFORMS } from "./analysis/geomorphons.js";
  * @type {Record<string, {label: string, unit: string, categorical?: boolean,
  *                        dp?: number, classes?: string[]}>}
  */
+import { inBand } from "./band.js";
+
 export const RULE_LAYERS = {
   elevation: { label: "Elevation", unit: " m", dp: 2 },
   slope: { label: "Slope", unit: "°", dp: 1 },
+  // ⚠️⚠️ CIRCULAR, AND THE ONLY LAYER HERE THAT IS. A bearing wraps, so a band
+  // whose min EXCEEDS its max is the arc through north — 315 → 45 is
+  // "north-facing", not the empty set a linear reading returns. Every other
+  // layer here must NOT wrap: a slope band of 25 → 5 is a mistake by the
+  // person who typed it, and quietly reading it as a wrap would select
+  // everything instead of nothing. That is why the wrap is a property of the
+  // LAYER and never inferred from the numbers.
+  aspect: { label: "Aspect", unit: "°", dp: 0, circular: true, period: 360 },
   twi: { label: "TWI · wetness", unit: "", dp: 1 },
   catchment: { label: "Catchment area", unit: " m²", dp: 0 },
   cutfill: { label: "Cut / fill so far", unit: " m", dp: 2 },
@@ -98,7 +108,8 @@ export function maskFromRule(dem, grids, rules, within = null) {
   for (const r of rules) {
     const g = grids[r.layer];
     if (!g || g.length !== n) { missing.push(r.layer); continue; }
-    active.push({ ...r, g, cat: !!RULE_LAYERS[r.layer]?.categorical });
+    active.push({ ...r, g, cat: !!RULE_LAYERS[r.layer]?.categorical,
+      circ: !!RULE_LAYERS[r.layer]?.circular });
   }
   // No usable rule means no selection — NOT "everything". A rule that could
   // not be evaluated must never widen the operation it was meant to narrow.
@@ -115,6 +126,12 @@ export function maskFromRule(dem, grids, rules, within = null) {
       if (!Number.isFinite(v)) { ok = false; break; }
       if (r.cat) {
         if (!r.classes || !r.classes.includes(Math.round(v))) { ok = false; break; }
+      } else if (r.circ) {
+        // ⚠️ A CIRCULAR BAND NEEDS BOTH BOUNDS. On a line, "steeper than 25°"
+        // is a half-plane and one bound says it; on a circle there is no such
+        // thing — every arc has two ends — so a missing bound is read as the
+        // whole wheel rather than as half of it.
+        if (!inBand(v, r.min ?? 0, r.max ?? 360, true)) { ok = false; break; }
       } else {
         if (r.min !== undefined && v < r.min) { ok = false; break; }
         if (r.max !== undefined && v > r.max) { ok = false; break; }

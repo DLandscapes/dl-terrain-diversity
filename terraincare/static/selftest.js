@@ -44,6 +44,7 @@ import { scaleBarLength } from "./export/figure.js";
 import { writeVoxelSolidOBJ, blockLevels, manifoldReport } from "./export/solid.js";
 import { geomorphons, LANDFORMS } from "./analysis/geomorphons.js";
 import { RULE_LAYERS, maskFromRule, maskRect, describeRules } from "./rules.js";
+import { inBand, bandFromCentre, bandShare } from "./band.js";
 import { demoTileHeights, DEMO_PATCHES, DEMO_DIVISIONS } from "./demotile.js";
 import { PATTERN_RANGE, patternRank, PATTERN_MEASURED as PM2 } from "./pattern.js";
 import { SelectionStack, composeStack, describeStack, surfaceStamp, stale,
@@ -1487,6 +1488,116 @@ export async function runSuite(fetchTile) {
         "across the whole table is ln(n)",
         `ln(${SPECIES.length}) = ${Math.log(SPECIES.length).toFixed(4)}`,
         SHANNON_MAX.toFixed(4), near(SHANNON_MAX, Math.log(SPECIES.length), 1e-12));
+    }
+  }
+
+  const X9 = "X9 · a band of a layer — read it, then select exactly what was read";
+  {
+    /**
+     * Marc, 2026-10-04, on the Aspect shader: "could you have an option to
+     * manipulate the colour ramp, so that you can for example only look at
+     * south facing faces, or faces within a certain range?"
+     *
+     * ⚠️⚠️ THE WHOLE RISK IN THIS FEATURE IS A DISAGREEMENT NOBODY REPORTS.
+     * The legend mutes what is outside a band and the Select panel turns the
+     * same band into a mask. If those two carried their own idea of "inside",
+     * the map would show one set of cells while every modifier acted on
+     * another, and nothing would raise an error — the tool would simply be
+     * wrong about which ground it was shaping. The last row here is that
+     * promise, asserted on the same numbers through both paths.
+     */
+
+    // ── the wrap, which is the reason band.js exists ─────────────────────
+    //
+    // ⚠️ IT IS A PROPERTY OF THE LAYER, NEVER INFERRED FROM THE NUMBERS. Aspect
+    // wraps because a bearing is a circle. A slope band of 25 → 5 is somebody
+    // mistyping, and reading THAT as a wrap would select everything instead of
+    // nothing — the most expensive possible way to be helpful.
+    const wrapN = [315, 45];
+    const inside = [315, 340, 0, 10, 45].every((v) => inBand(v, 315, 45, true));
+    const outside = [46, 90, 180, 270, 314].every((v) => !inBand(v, 315, 45, true));
+    add(X9, "a circular band whose low end EXCEEDS its high end is the arc "
+      + "through zero — north is 315°→45°, which is what a bearing means and "
+      + "what a percentile cut cannot say at all",
+      "315,340,0,10,45 in · 46,90,180,270,314 out",
+      `${inside ? "all in" : "MISSED ONE"} · ${outside ? "all out" : "LET ONE IN"}`,
+      inside && outside);
+
+    const linearSame = [315, 340, 0, 10, 45].filter((v) => inBand(v, 315, 45, false));
+    add(X9, "…and the SAME two numbers on a linear layer select nothing, because "
+      + "the wrap is a property of the layer and never inferred from the values "
+      + "— a slope band of 25→5 is a typo, not a request for everything",
+      "0 of 5 values", `${linearSame.length} of 5 values`, linearSame.length === 0);
+
+    const [sLo, sHi] = bandFromCentre(180, 90);
+    const [nLo, nHi] = bandFromCentre(0, 90);
+    add(X9, "a centre and a width become the band the rest of the tool uses — "
+      + "south is an ordinary interval, north is the wrapping one, from the "
+      + "same call",
+      "S 135–225 · N 315–45", `S ${sLo}–${sHi} · N ${nLo}–${nHi}`,
+      sLo === 135 && sHi === 225 && nLo === 315 && nHi === 45);
+
+    const [fLo, fHi] = bandFromCentre(180, 360);
+    add(X9, "…and a band as wide as the circle is the WHOLE range, not a "
+      + "degenerate arc that happens to touch its own tail",
+      "0–360", `${fLo}–${fHi}`, fLo === 0 && fHi === 360);
+
+    add(X9, "NaN is never a member of a band — 'no answer' cannot face south",
+      "excluded", inBand(NaN, 0, 360, true) ? "INCLUDED" : "excluded",
+      !inBand(NaN, 0, 360, true));
+
+    // ── muting is not the same as having no answer ───────────────────────
+    //
+    // ⚠️ THE TONE MATTERS AND IS NOT DECORATION. NODATA_RGB says "this cell has
+    // no answer". A cell outside the band HAS an answer; it is simply not what
+    // was asked for. Painting it with the nodata grey would make the map claim
+    // the data is missing.
+    {
+      const g = new Float32Array([0, 90, 180, 270]);
+      const px = colourise("aspect", g, undefined, undefined, { lo: 135, hi: 225 });
+      const at = (i) => [px[i * 4], px[i * 4 + 1], px[i * 4 + 2]];
+      const sheet = at(0).join(",") === NEUTRAL_RGB.join(",")
+        && at(3).join(",") === NEUTRAL_RGB.join(",");
+      const kept = at(2).join(",") !== NEUTRAL_RGB.join(",");
+      const notNodata = at(0).join(",") !== NODATA_RGB.join(",");
+      add(X9, "colouring with a band keeps what is inside it and drops the rest "
+        + "to the SHEET tone — not to the nodata grey, which would have the map "
+        + "claim those cells were never measured",
+        "outside = sheet, inside = coloured, never nodata",
+        `outside ${sheet ? "sheet" : "NOT sheet"} · inside ${kept ? "coloured" : "MUTED"} `
+        + `· ${notNodata ? "not nodata" : "NODATA GREY"}`,
+        sheet && kept && notNodata);
+    }
+
+    // ⚠️ AND THE ROW THAT CATCHES THE REAL DANGER. A band is read off the
+    // legend and then handed to the Select panel; these are different code
+    // paths over the same grid, and they must return the same cells. If this
+    // row ever goes red, the tool is painting one map and shaping another.
+    {
+      const n = 48 * 48;
+      const aspect = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        // a spread of bearings including both sides of the wrap, plus nodata
+        aspect[i] = i % 37 === 0 ? NaN : (i * 7.3) % 360;
+      }
+      const dem = { nrows: 48, ncols: 48 };
+      const band = bandFromCentre(0, 90);        // north, wrapping
+      const viaLegend = bandShare(aspect, band[0], band[1], true);
+      const viaRule = maskFromRule(dem, { aspect },
+        [{ layer: "aspect", min: band[0], max: band[1] }]);
+      add(X9, "the band the LEGEND reports and the selection the RULE builds are "
+        + "the same cells, over the same grid, through two different code paths "
+        + "— this is the promise the feature rests on",
+        `${viaLegend.inside} cells`, `${viaRule.count} cells`,
+        viaLegend.inside === viaRule.count && viaLegend.inside > 0);
+
+      // …and the nodata cells are in neither, nor in the denominator
+      const nodata = Math.floor((n + 36) / 37);
+      add(X9, "…with the cells that have no answer counted in neither, and kept "
+        + "out of the denominator, so a share reads 'of the ground this layer "
+        + "describes'",
+        `${n - nodata} answered`, `${viaLegend.answered} answered`,
+        viaLegend.answered === n - nodata);
     }
   }
 

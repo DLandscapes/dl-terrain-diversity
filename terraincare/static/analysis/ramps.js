@@ -34,6 +34,8 @@
 // actually varies. The UI chrome stays muted; the data does not.
 
 /** Theme tones, kept in step with static/style.css. */
+import { inBand } from "../band.js";
+
 export const NODATA_RGB = [214, 210, 202];   // muted paper grey — "no answer"
 export const NEUTRAL_RGB = [253, 252, 249];  // --sheet, exact
 
@@ -573,9 +575,13 @@ export function makeLUT(id, domain, variant) {
  * @param {Float32Array} grid
  * @param {[number, number]} [domain] override the ramp's default range
  * @param {string} [variant] palette variant
+ * @param {{lo:number, hi:number}|null} [band] show ONLY this range of values;
+ *   everything else is drawn in the sheet tone. A band whose `lo` exceeds its
+ *   `hi` on a circular ramp is the arc through zero — that is how "north" is
+ *   expressed. See band.js, which both this and the Select panel read.
  * @returns {Uint8ClampedArray} length grid.length*4
  */
-export function colourise(id, grid, domain, variant) {
+export function colourise(id, grid, domain, variant, band = null) {
   const n = grid.length;
   const out = new Uint8ClampedArray(n * 4);
   const { lut, lo, hi, circular, diverging } = makeLUT(id, domain, variant);
@@ -596,6 +602,16 @@ export function colourise(id, grid, domain, variant) {
     // did not change must return the neutral tone bit-exactly, and quantising
     // it through 512 steps would not guarantee that.
     if (diverging && v === 0) {
+      out[o] = er; out[o + 1] = eg; out[o + 2] = eb;
+      continue;
+    }
+    // ⚠️ THE BAND IS TESTED ON THE VALUE, NOT ON THE TABLE INDEX. The LUT
+    // CLAMPS anything outside the domain onto its end entries, so a 50° slope
+    // and a 40° one share a table slot; baking the band into the table would
+    // paint that 50° cell as a member of a 25–40° band. The test costs a
+    // comparison per cell and only when a band is set — the default path below
+    // is untouched.
+    if (band && !inBand(v, band.lo, band.hi, circular)) {
       out[o] = er; out[o + 1] = eg; out[o + 2] = eb;
       continue;
     }

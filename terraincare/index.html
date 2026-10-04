@@ -911,6 +911,35 @@
     color: var(--ink-soft); white-space: nowrap;
   }
   .legend .palrow .pal:hover { color: var(--ink); border-color: var(--ink-soft); }
+  /* ── Band controls: "show only part of this layer" ─────────────────────
+     Only the shared legend in the right-hand readout carries these. A filter
+     governs a READING, and readings live on the right — the same edge that
+     sent the shader selector to the left and left the ramp here. The per-tile
+     legends in Display are thumbnails and stay controls-free. */
+  .legend .bandrow { margin-top: 4px; pointer-events: auto; }
+  .legend .bandline { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+  .legend .bandrow button, .legend .bandrow select {
+    padding: 1px 4px; border: 1px solid var(--line); border-radius: 3px;
+    background: var(--sheet); cursor: pointer; pointer-events: auto;
+    font-family: var(--font-head); font-size: .62rem; line-height: 1.3;
+    color: var(--ink-soft); white-space: nowrap;
+  }
+  .legend .bandrow button:hover, .legend .bandrow select:hover {
+    color: var(--ink); border-color: var(--ink-soft);
+  }
+  /* ⚠️ THE CHOSEN DIRECTION IS INK ON PAPER, NOT A TINT. The palette has no
+     accent colour and does not get one for a UI state — see the note on the
+     deepened ochre elsewhere in this sheet. */
+  .legend .bandrow button.on {
+    color: var(--sheet); background: var(--ink); border-color: var(--ink);
+  }
+  .legend .compass { display: flex; gap: 2px; }
+  .legend .compass button { padding: 1px 3px; min-width: 19px; text-align: center; }
+  .legend .bandshare {
+    font-size: .62rem; color: var(--ink-soft); margin-left: auto;
+    font-family: var(--font-head); white-space: nowrap;
+  }
+  .legend .bandsel { margin-top: 3px; }
   /* An adjusted layer says so in its panel label, so a tuned stretch is never
      invisible when you come back to the tool later. */
   .legend .handles.adjusted ~ .ends b::after { content: " ·adj"; color: var(--ink-soft); }
@@ -1526,11 +1555,18 @@
     <div class="row" id="rule-range">
       <label class="field">
         <span>At least <em id="rule-min-val">—</em></span>
-        <input type="range" id="rule-min" min="0" max="100" step="1" value="0">
+        <!-- ⚠️ step 0.25, NOT 1. These sliders are a PERCENTAGE of the layer's
+             domain, so on aspect one notch of 1 was 3.6° and the band the
+             legend had just drawn could not be expressed: "north ± 45°"
+             arrived as 317°–47° and selected a different set of cells from
+             the one on screen. 0.25 lands every compass band exactly
+             (6.25, 12.5, 18.75, 87.5 …), which is what keeps the map and
+             the selection the same claim. -->
+        <input type="range" id="rule-min" min="0" max="100" step="0.25" value="0">
       </label>
       <label class="field">
         <span>At most <em id="rule-max-val">—</em></span>
-        <input type="range" id="rule-max" min="0" max="100" step="1" value="100">
+        <input type="range" id="rule-max" min="0" max="100" step="0.25" value="100">
       </label>
     </div>
     <!-- ⚠️ …AND A CATEGORICAL ONE IS PICKED BY MEMBERSHIP, because its values

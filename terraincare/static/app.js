@@ -44,6 +44,7 @@ import { DimensionFrame } from "./dimensions.js";
 import { readOrthoTIFF, drapeOnto } from "./ortho.js";
 import { readPhoto } from "./photos.js";
 import { RULE_LAYERS, maskFromRule, maskRect, describeRules } from "./rules.js";
+import { bandFromCentre, bandShare, compassName, COMPASS } from "./band.js";
 import { SelectionOverlay } from "./selection-view.js";
 import { demoTileHeights, DEMO_PATCHES, DEMO_DIVISIONS } from "./demotile.js";
 import { DemoGridOverlay } from "./demogrid.js";
@@ -172,6 +173,23 @@ const state = {
    */
   /** @type {Record<string, number[]>} */ stretch: {},
   /** @type {Record<string, string>} */ variant: {},
+  /**
+   * Show ONLY part of a layer: the rest is drawn in the sheet tone.
+   *
+   * `isolate` reuses the range the stretch handles already set, so isolating
+   * needs no second pair of handles — the handles say which values matter and
+   * this says whether the rest is clamped to the ends of the ramp, as a GIS
+   * does, or dropped out of the picture.
+   *
+   * `band` is for a layer that cannot be stretched because its range is not a
+   * line. ⚠️ IN PRACTICE THAT IS ASPECT, AND IT IS WHY THIS EXISTS: a bearing
+   * wraps, so "north-facing" is the arc 315°→45°, where lo is GREATER than hi
+   * and a percentile cut cannot express it at all. Stored in the layer's own
+   * units (degrees), not percentiles, because a compass direction does not
+   * move when the terrain is edited underneath it.
+   */
+  /** @type {Record<string, boolean>} */ isolate: {},
+  /** @type {Record<string, number[]>} */ band: {},
   /** pristine copy, for reset and for the datum */
   /** @type {Float32Array|null} */ baseZ: null,
   datum: 0,
@@ -563,8 +581,236 @@ const DEFAULT_CUTS = {
  * range, and vice versa.
  * @type {(() => void)[]}
  */
+/**
+ * The functions that reposition a legend's controls, each tagged with the
+ * element it belongs to.
+ *
+ * ⚠️ TAGGED, BECAUSE THE SHARED LEGEND'S CONTROLS ARE REBUILT EVERY TIME THE
+ * LAYER CHANGES. A plain list grew one dead closure per shader switch, each
+ * still writing to a removed node and each still holding the layer key it was
+ * born with — the quiet half of the same bug the comment in fillLegend
+ * describes.
+ * @type {{el: Element, fn: () => void}[]}
+ */
 const stretchPlacers = [];
-function refreshStretchHandles() { for (const f of stretchPlacers) f(); }
+function refreshStretchHandles() { for (const p of stretchPlacers) p.fn(); }
+/** @param {Element} el */
+function dropPlacersFor(el) {
+  for (let i = stretchPlacers.length - 1; i >= 0; i--) {
+    if (stretchPlacers[i].el === el) stretchPlacers.splice(i, 1);
+  }
+}
+
+/**
+ * "Show only part of this layer" — the controls that turn a ramp into a filter,
+ * and the filter into a selection.
+ *
+ * Marc, 2026-10-04: "if you use the Aspect shader, could you have an option to
+ * manipulate the colour ramp, so that you can for example only look at south
+ * facing faces, or faces within a certain range?"
+ *
+ * ⚠️ TWO DIFFERENT CONTROLS, BECAUSE THERE ARE TWO KINDS OF RANGE, and the
+ * difference is not cosmetic:
+ *
+ * - A LINEAR layer already has handles that say which values matter. Isolating
+ *   reuses them: the same two numbers, with the outside DROPPED instead of
+ *   clamped to the ends of the ramp. A second pair of handles meaning something
+ *   almost-but-not-quite the same would be a trap.
+ * - A CIRCULAR layer — aspect, the only one here — cannot use them at all. A
+ *   bearing has no low end and no high end to pull in, and the band a reader
+ *   actually wants ("south, give or take") is a CENTRE and a WIDTH. North is
+ *   315°→45°, where lo exceeds hi, which no percentile cut can express. So
+ *   aspect gets a compass instead, and that is why it never had handles.
+ *
+ * ⚠️ THE SHARED LEGEND ONLY. The per-tile legends in Display are thumbnails of
+ * a ramp; a filter governs a READING, and readings live on the right. That is
+ * the edge the whole interface is built on.
+ *
+ * @param {Element} el @param {string} k
+ */
+function addBandControls(el, k) {
+  if (el.id !== "shade-legend") return;
+  const meta = LEGEND[k];
+  if (!meta || meta.categorical) return;
+  if (el.querySelector(".bandrow")) return;
+
+  const row = document.createElement("div");
+  row.className = "bandrow";
+  const line = document.createElement("div");
+  line.className = "bandline";
+  row.appendChild(line);
+
+  const share = document.createElement("span");
+  share.className = "bandshare";
+
+  /** Re-colour, re-place, and re-read the share. */
+  const changed = () => {
+    pushView();
+    place();
+    updateShare();
+  };
+
+  /**
+   * ⚠️ READ FROM THE GRID, NOT COUNTED OFF THE PICTURE. The share has to mean
+   * "of the ground this layer describes", so nodata is out of the denominator
+   * — see bandShare. Counting muted pixels would also count the cells that have
+   * no answer, and report a south-facing share that quietly shrinks wherever
+   * the layer is undefined.
+   */
+  const updateShare = async () => {
+    const band = state.band[k];
+    if (!band && !state.isolate[k]) { share.textContent = ""; return; }
+    const [lo, hi] = band || state.domains[k] || RAMPS[k].domain;
+    const grids = await ensureRuleGrids();
+    const g = grids[k];
+    if (!g) { share.textContent = "not computed yet"; return; }
+    const r = bandShare(g, lo, hi, !!meta.circular);
+    share.textContent = r.answered
+      ? `${((r.share * 100)).toFixed(0)}% of the ground`
+      : "nothing measured here";
+  };
+
+  let place = () => {};
+
+  if (meta.circular) {
+    // ── a compass, because a bearing is a direction and a width ───────────
+    const pts = document.createElement("div");
+    pts.className = "compass";
+    const btns = COMPASS.map(({ label, bearing }) => {
+      const b = document.createElement("button");
+      b.textContent = label;
+      b.title = `faces ${label} (${bearing}°)`;
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const cur = state.band[k];
+        const width = cur ? widthOf(cur) : 90;
+        const next = bandFromCentre(bearing, width);
+        // clicking the direction already shown clears it, so the control can
+        // always be undone with the button that set it
+        if (cur && cur[0] === next[0] && cur[1] === next[1]) delete state.band[k];
+        else state.band[k] = next;
+        changed();
+        status(state.band[k]
+          ? `aspect showing ${compassName(bearing)} ± ${(width / 2).toFixed(0)}°`
+          : "aspect showing every direction");
+      });
+      pts.appendChild(b);
+      return { b, bearing };
+    });
+    line.appendChild(pts);
+
+    const widthSel = document.createElement("select");
+    widthSel.className = "bandwidth";
+    widthSel.title = "how wide a slice of the compass counts as that direction";
+    for (const w of [45, 90, 180]) {
+      widthSel.add(new Option(`± ${(w / 2).toFixed(0)}°`, String(w)));
+    }
+    widthSel.value = "90";
+    widthSel.addEventListener("change", (e) => {
+      e.stopPropagation();
+      const cur = state.band[k];
+      if (!cur) return;
+      state.band[k] = bandFromCentre(centreOf(cur), parseFloat(widthSel.value));
+      changed();
+    });
+    line.appendChild(widthSel);
+
+    const all = document.createElement("button");
+    all.className = "bandall";
+    all.textContent = "all";
+    all.title = "show every direction again";
+    all.addEventListener("click", (e) => {
+      e.stopPropagation();
+      delete state.band[k];
+      changed();
+      status("aspect showing every direction");
+    });
+    line.appendChild(all);
+
+    place = () => {
+      const cur = state.band[k];
+      const c = cur ? centreOf(cur) : null;
+      for (const { b, bearing } of btns) {
+        b.classList.toggle("on", c !== null && Math.abs(((c - bearing + 540) % 360) - 180) < 0.01);
+      }
+      if (cur) widthSel.value = String(Math.round(widthOf(cur)));
+      all.classList.toggle("on", !cur);
+      row.classList.toggle("adjusted", !!cur);
+    };
+  } else {
+    // ── isolate, reusing the handles that are already there ───────────────
+    const iso = document.createElement("button");
+    iso.className = "bandiso";
+    iso.title = "show only the values between the handles; the rest goes blank "
+      + "instead of being clamped to the ends of the ramp";
+    iso.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (state.isolate[k]) delete state.isolate[k];
+      else state.isolate[k] = true;
+      changed();
+      status(state.isolate[k]
+        ? `${layerTitle(k)}: showing only the range between the handles`
+        : `${layerTitle(k)}: showing the whole range again`);
+    });
+    line.appendChild(iso);
+    place = () => {
+      const on = !!state.isolate[k];
+      iso.textContent = on ? "isolating · show all" : "isolate this range";
+      iso.classList.toggle("on", on);
+      row.classList.toggle("adjusted", on);
+    };
+  }
+
+  line.appendChild(share);
+
+  // ── and the band becomes a selection ───────────────────────────────────
+  const toSel = document.createElement("button");
+  toSel.className = "bandsel";
+  toSel.textContent = "select this band";
+  toSel.title = "turn what is shown into a selection, under Select › By attribute";
+  toSel.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (!RULE_LAYERS[k]) {
+      status(`${layerTitle(k)} cannot be used as a rule`);
+      return;
+    }
+    const band = state.band[k] || state.domains[k] || RAMPS[k].domain;
+    const selEl = /** @type {HTMLSelectElement} */ ($("rule-layer"));
+    await syncRuleUI();                 // make sure the dropdown is populated
+    selEl.value = k;
+    const [blo, bhi] = ruleBounds(k);
+    const pct = (v) => Math.max(0, Math.min(100, ((v - blo) / (bhi - blo)) * 100));
+    /** @type {HTMLInputElement} */ ($("rule-min")).value = String(pct(band[0]));
+    /** @type {HTMLInputElement} */ ($("rule-max")).value = String(pct(band[1]));
+    $("t-rule").classList.add("on");
+    await syncRuleUI();
+    status(`selecting ${layerTitle(k)} ${fmtBand(k, band)}`);
+  });
+  row.appendChild(toSel);
+
+  const palrow = el.querySelector(".palrow");
+  if (palrow) palrow.insertAdjacentElement("afterend", row);
+  else el.appendChild(row);
+
+  place();
+  updateShare();
+  stretchPlacers.push({ el, fn: place });
+}
+
+/** The full width of a circular band, in degrees. */
+function widthOf([lo, hi]) { return ((hi - lo) % 360 + 360) % 360 || 360; }
+/** The centre bearing of a circular band. */
+function centreOf(b) { return (b[0] + widthOf(b) / 2) % 360; }
+
+/** A band in words, for the status line. */
+function fmtBand(k, [lo, hi]) {
+  const meta = LEGEND[k];
+  if (meta?.circular) {
+    return `${compassName(centreOf([lo, hi]))} ± ${(widthOf([lo, hi]) / 2).toFixed(0)}°`;
+  }
+  const dp = meta?.dp ?? 2;
+  return `${lo.toFixed(dp)}${meta?.unit || ""} – ${hi.toFixed(dp)}${meta?.unit || ""}`;
+}
 
 /**
  * Two draggable triangles under a legend bar, one per end of the stretch, plus
@@ -636,7 +882,7 @@ function addStretchHandles(el, k) {
       : "drag to set the percentile each end of the ramp starts at";
   };
   place();
-  stretchPlacers.push(place);
+  stretchPlacers.push({ el, fn: place });
 
   const drag = (handle, which) => {
     handle.addEventListener("pointerdown", (e) => {
@@ -702,7 +948,8 @@ function addStretchHandles(el, k) {
 
 /** Send the current display settings to the worker for a re-colour. */
 function pushView() {
-  state.analysis?.setView({ stretch: state.stretch, variant: state.variant });
+  state.analysis?.setView({ stretch: state.stretch, variant: state.variant,
+    isolate: state.isolate, band: state.band });
 }
 
 /** Fill any legend element for a layer. Shared by the panel hovers and the
@@ -743,7 +990,28 @@ function fillLegend(el, k) {
   /** @type {HTMLElement} */ (el.querySelector(".bar"))
     .style.background = `linear-gradient(90deg, ${stops.join(",")})`;
 
+  // ⚠️⚠️ THE CONTROLS ARE REBUILT WHEN THE LAYER CHANGES, AND THEY WERE NOT.
+  // `#shade-legend` is ONE element reused for every layer — the bar and the
+  // labels are rewritten in place — but addStretchHandles returns early if a
+  // handle row already exists, so the handles were created exactly once and
+  // their closure captured whichever layer happened to be active then. That is
+  // TWI, the default shader, so every other layer displayed TWI's handles and
+  // dragging them moved TWI's ramp while the reader watched a different map.
+  // Aspect made it visible: it is meant to have NO handles at all (a bearing
+  // has nothing to stretch), yet triangles sat on its hue wheel — leftovers.
+  //
+  // Per-tile legends are unaffected: each tile owns its element, so its layer
+  // never changes and this comparison never fires.
+  if (el.dataset.controlsFor !== k) {
+    for (const sel of [".handles", ".palrow", ".bandrow"]) {
+      const old = el.querySelector(sel);
+      if (old) old.remove();
+    }
+    dropPlacersFor(el);
+    el.dataset.controlsFor = k;
+  }
   addStretchHandles(el, k);
+  addBandControls(el, k);
 
   const ends = el.querySelectorAll(".ends span");
   // A log-scaled layer is stretched in log space but must be READ in its own
