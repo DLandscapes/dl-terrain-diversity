@@ -49,10 +49,22 @@
 import * as THREE from "three";
 import { textSprite } from "./dimensions.js";
 
-/** Poché ground — paper, not sand. The hatch does the work; this stops daylight. */
-const CUT_FILL = 0xf1ece2;
+/**
+ * Poché ground — paper, not sand. The hatch does the work; this stops daylight.
+ *
+ * ⚠️ DESATURATED 2026-10-04 (Marc: "the only thing below it is a little yellow
+ * in the hatch — can that be desaturated?"). Measured as channel spread, which
+ * is the honest figure at these lightnesses — HLS saturation reads 50 % for the
+ * near-white sheet tone and means nothing there. The fill spread 15 and the
+ * hatch 13, against the house nodata grey at 12 and the sheet at 4; at the
+ * hatch's 50 % opacity the two composited to a warm grey that reads yellow
+ * beside the cool end of an analysis layer. Both are halved to 7 and 6, at the
+ * same lightness and the same hue, so the poché still reads as paper rather
+ * than going dead neutral against a palette that is warm everywhere else.
+ */
+const CUT_FILL = 0xeeebe7;
 /** The hatch itself: ink, held well back from the profile's weight. */
-const CUT_HATCH = 0x4a463d;
+const CUT_HATCH = 0x474541;
 const CUT_EDGE = 0x26241f;
 
 export class SectionFace {
