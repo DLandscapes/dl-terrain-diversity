@@ -1640,6 +1640,45 @@ export async function runSuite(fetchTile) {
       + "ground, a closed body of 0.0 m³",
       "refused", refused ? "refused" : "BUILT IT ANYWAY", refused);
 
+    // ── a shell, which is a different object ────────────────────────────
+    //
+    // Marc, 2026-10-04: "can there also be a function where making it solid
+    // works more like giving it a shell and specifying the thickness".
+    {
+      const sh = audit(writeSurfaceSolidOBJ(bump, { shell: 2 }).obj);
+      add(X10, "a SHELL closes too — the lower surface follows the ground "
+        + "instead of being a flat floor, and nothing else about the proof "
+        + "changes, because the floor was never special",
+        "closed, outward, welded",
+        `${sh.unpaired} unpaired · ${sh.vol > 0 ? "outward" : "INWARD"} · `
+        + `${sh.coincident} coincident`,
+        sh.unpaired === 0 && sh.vol > 0 && sh.coincident === 0);
+
+      // ⚠️ EXACT, AND IT IS A PROPERTY OF THE OFFSET, NOT OF THIS TERRAIN. The
+      // volume between a surface and the same surface dropped by t is the plan
+      // area times t, whatever the ground does in between. If this row ever
+      // drifts, the lower surface is no longer a pure vertical offset.
+      const foot = (bump.ncols - 1) * (bump.nrows - 1) * bump.cell * bump.cell;
+      add(X10, "…and a shell encloses exactly its plan area times its thickness "
+        + "— true of any terrain, because a vertical offset adds no volume of "
+        + "its own",
+        `${(foot * 2).toFixed(1)} m³`, `${sh.vol.toFixed(1)} m³`,
+        Math.abs(sh.vol - foot * 2) < 1e-6);
+
+      // ⚠️ AND THE WALL IS THINNER THAN THE NUMBER TYPED IN. Dropping each
+      // point straight down leaves t·cos(slope) perpendicular to the surface.
+      // Reported rather than silently delivered, because a printer's minimum
+      // feature size is compared against the THIN figure.
+      const res = writeSurfaceSolidOBJ(bump, { shell: 2 });
+      const expected = 2 / Math.sqrt(1 + Math.tan(res.maxSlopeDeg * Math.PI / 180) ** 2);
+      add(X10, "…and it reports the thinnest wall a vertical offset leaves, "
+        + "which on a slope is LESS than the thickness asked for — that is the "
+        + "figure a printer's minimum feature size has to be compared against",
+        `${expected.toFixed(3)} m at ${res.maxSlopeDeg.toFixed(1)}°`,
+        `${res.minWall.toFixed(3)} m at ${res.maxSlopeDeg.toFixed(1)}°`,
+        Math.abs(res.minWall - expected) < 1e-9 && res.minWall < 2);
+    }
+
     // the plinth is material, and exactly as much as asked for
     const v1 = audit(writeSurfaceSolidOBJ(bump, { baseThickness: 1 }).obj).vol;
     const v3 = audit(writeSurfaceSolidOBJ(bump, { baseThickness: 3 }).obj).vol;

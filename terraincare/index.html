@@ -2669,9 +2669,31 @@
                wound. The exporter refuses it rather than let that reach a
                slicer. It is also what lets the model be laid on its back and
                printed standing. -->
+          <!-- ⚠️ TWO DIFFERENT OBJECTS, NOT TWO SETTINGS. A solid is filled and
+               stands on its floor; a shell is a skin that follows the ground
+               top and bottom, for a large model where the inside is only
+               material and weight. The floor was never special — it is simply
+               the lower surface held constant — so the same builder makes both. -->
           <label class="field">
+            <span>Make</span>
+            <select id="print-make">
+              <option value="solid" selected>a filled solid, standing on a floor</option>
+              <option value="shell">a shell of a stated thickness</option>
+            </select>
+          </label>
+          <label class="field" id="print-base-row">
             <span>Base under the lowest ground</span>
             <input type="number" id="print-base" min="0.1" max="500" step="0.5" value="2">
+          </label>
+          <!-- ⚠️ MEASURED VERTICALLY, AND THINNER THAN THIS ON A SLOPE. Dropping
+               each point straight down leaves t·cos(slope) perpendicular to the
+               surface, so 2 m on the flat is 1 m at 60°. Offsetting along the
+               normal instead self-intersects in every concavity on real ground.
+               The export reports its thinnest wall; that is the number to
+               compare with a printer, not the one typed here. -->
+          <label class="field" id="print-shell-row" hidden>
+            <span>Shell thickness</span>
+            <input type="number" id="print-shell" min="0.05" max="500" step="0.5" value="2">
           </label>
           <label class="field">
             <span>Vertical exaggeration</span>

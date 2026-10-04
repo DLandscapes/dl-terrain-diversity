@@ -37,7 +37,7 @@ It opens on a **synthetic flat plane**, not on survey data — see
 ## Test it
 
 ```bash
-node terraincare/static/_selftest.mjs     # 649 checks, headless
+node terraincare/static/_selftest.mjs     # 652 checks, headless
 ```
 
 The render suite is browser-only because it asserts on pixels and on the
@@ -55,7 +55,7 @@ identically in Node and in the browser, over the same modules the app loads.
 > exported sheets state a scale they are not drawn at. The rows were written to
 > fail against that named defect and stay red until the exporters are fixed — a
 > suite made green by loosening its own checks proves nothing, and the defect is
-> in the sheets, not in the test. The remaining **641 of 649 pass**, as do **165
+> in the sheets, not in the test. The remaining **644 of 652 pass**, as do **165
 > of 165** in the render suite. The scale *bars* on those sheets are already
 > correct; it is the printed ratio that overstates.
 
@@ -96,7 +96,8 @@ one direction), each of which says so on its face.
 - **Shapefile / GeoJSON** — regions with their attributes
 - **DXF** — drainage channels and catchments as CAD layers (R12, layers by class)
 - **A closed solid** — the surface or the fused voxels as one watertight,
-  welded, outward-wound body with a floor under it, for printing
+  welded, outward-wound body with a floor under it, for printing, or a
+  **shell** of a stated thickness, which reports its own thinnest wall
 - **SVG / PDF** — grading plan, chainage sections, isopach, slope classes
 - **ZIP** — the lot, with a key and a provenance record
 

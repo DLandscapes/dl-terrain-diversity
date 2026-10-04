@@ -9346,7 +9346,33 @@ $("t-print").addEventListener("click", () => {
   $("t-print").classList.toggle("on");
   syncPrintUI();
 });
+
+/**
+ * Show the field that belongs to the object being made.
+ *
+ * ⚠️ A SHELL IS OFFERED FOR THE SURFACE ONLY. The voxel export fuses columns by
+ * emitting a face wherever one meets air — there is no inner surface to offset,
+ * and hollowing a staircase of cubes is a different algorithm, not a flag. The
+ * control says so rather than silently making a filled body out of a request
+ * for a shell.
+ */
+function syncPrintMake() {
+  const voxels = /** @type {HTMLSelectElement} */ ($("print-source")).value === "voxels";
+  const sel = /** @type {HTMLSelectElement} */ ($("print-make"));
+  if (voxels && sel.value === "shell") sel.value = "solid";
+  sel.disabled = voxels;
+  sel.title = voxels
+    ? "the voxel body is built by fusing columns, which has no inner surface to "
+      + "offset — a shell is offered for the surface"
+    : "a filled solid, or a skin of a stated thickness";
+  const shell = sel.value === "shell";
+  $("print-shell-row").hidden = !shell;
+  $("print-base-row").hidden = shell;
+}
+$("print-make").addEventListener("change", syncPrintMake);
+$("print-source").addEventListener("change", syncPrintMake);
 syncPrintUI();
+syncPrintMake();
 
 function exportPrintSolid() {
   const dem = state.dem;
@@ -9354,6 +9380,9 @@ function exportPrintSolid() {
   const src = /** @type {HTMLSelectElement} */ ($("print-source")).value;
   const base = parseFloat(/** @type {HTMLInputElement} */ ($("print-base")).value);
   const ex = parseFloat(/** @type {HTMLInputElement} */ ($("print-ex")).value) || 1;
+  const makeShell = /** @type {HTMLSelectElement} */ ($("print-make")).value === "shell"
+    && src !== "voxels";
+  const shellT = parseFloat(/** @type {HTMLInputElement} */ ($("print-shell")).value);
   const one = /** @type {HTMLInputElement} */ ($("print-one")).checked;
   const note = $("print-note");
 
@@ -9389,9 +9418,12 @@ function exportPrintSolid() {
     stem = "voxel-solid";
   } else {
     res = writeSurfaceSolidOBJ(dem, {
-      exaggeration: ex, baseThickness: base, layerLabel: "solid for printing",
+      exaggeration: ex,
+      baseThickness: base,
+      shell: makeShell ? shellT : 0,
+      layerLabel: makeShell ? "shell for printing" : "solid for printing",
     });
-    stem = "surface-solid";
+    stem = makeShell ? "surface-shell" : "surface-solid";
   }
 
   download(new Blob([res.obj], { type: "text/plain" }), `${exportStem(stem)}.obj`);
@@ -9410,7 +9442,14 @@ function exportPrintSolid() {
     + (snapped !== null && Math.abs(snapped - base) > 1e-9
       ? ` · base snapped to ${snapped.toFixed(2)} m, a whole number of cubes`
       : "")
-    + (ex === 1 ? " · true elevations" : ` · ${ex}× exaggerated`);
+    + (ex === 1 ? " · true elevations" : ` · ${ex}× exaggerated`)
+    // ⚠️ THE THINNEST WALL IS THE NUMBER THAT MATTERS, not the one typed in.
+    // A vertical offset leaves t·cos(slope), so the steepest cell decides what
+    // the model is actually printed at.
+    + (res.shell
+      ? ` · shell ${res.shell} m, thinnest wall ${res.minWall.toFixed(2)} m `
+        + `at the steepest cell (${res.maxSlopeDeg.toFixed(0)}°)`
+      : "");
   note.textContent = words;
   status(`${src === "voxels" ? "Voxel" : "Surface"} solid exported · ${words}`, 9000);
 }

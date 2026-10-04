@@ -234,16 +234,34 @@ function shell(inSet, levels, bRows, bCols, pool, g) {
  * knife edge still has a slab to sit on — and a slab is also what lets the model
  * be laid on its back and printed standing, which is what it is for.
  *
+ * ⚠️ OR A SHELL, WHICH IS A DIFFERENT OBJECT. With `shell` set, the lower
+ * surface stops being a flat floor and FOLLOWS THE TERRAIN at that distance
+ * below it: a skin of stated thickness rather than a filled body, which is what
+ * a large model wants when the inside is only material and weight. Everything
+ * else is unchanged — same top, same rim walls, same proof of closure — because
+ * the floor was never special, it was simply the lower surface held constant.
+ *
+ * ⚠️⚠️ A VERTICAL OFFSET IS NOT A CONSTANT THICKNESS, AND ON A SLOPE IT IS
+ * THINNER THAN ASKED. Dropping each vertex straight down by t leaves a wall
+ * measuring t·cos(slope) perpendicular to the surface: 2 mm on flat ground is
+ * 1.41 mm at 45° and 1.0 mm at 60°. The honest alternative, offsetting along
+ * the normal, self-intersects in every concavity on a real terrain. So the
+ * offset stays vertical and the result REPORTS its thinnest wall, which is the
+ * number a printer's minimum feature size has to be compared against.
+ *
  * @param {import("../dem.js").DEM} dem
- * @param {{exaggeration?: number, baseThickness?: number, layerLabel?: string}} [opts]
+ * @param {{exaggeration?: number, baseThickness?: number, shell?: number,
+ *          layerLabel?: string}} [opts]
  * @returns {{obj: string, triangles: number, vertices: number, shells: number,
  *            report: ReturnType<typeof manifoldReport>, minZ: number, baseZ: number,
- *            size: [number, number, number], dropped: number}}
+ *            size: [number, number, number], dropped: number,
+ *            shell: number|null, minWall: number|null, maxSlopeDeg: number|null}}
  */
 export function writeSurfaceSolidOBJ(dem, opts = {}) {
   const { z, nrows, ncols, cell } = dem;
   const ex = opts.exaggeration ?? 1;
   const thickness = Math.max(0, opts.baseThickness ?? 0);
+  const shell = opts.shell && opts.shell > 0 ? opts.shell : 0;
   const northY = nrows * cell;
 
   let minZ = Infinity, maxZ = -Infinity;
@@ -262,14 +280,17 @@ export function writeSurfaceSolidOBJ(dem, opts = {}) {
   // slicer either drops or prints as a stray film. On flat ground the whole body
   // degenerates — measured on an 8x8 plane: closed, manifold, correctly wound,
   // and 0.0 m³ of material. Refused here rather than discovered on the printer.
-  if (!(thickness > 0)) {
+  if (!shell && !(thickness > 0)) {
     throw new Error(
       "a printable solid needs material under its lowest point — set a base "
       + "thickness above 0. With none, the floor touches the ground at the "
       + "lowest cell and the model has no thickness there."
     );
   }
-  const baseZ = minZ * ex - thickness;
+  // ⚠️ IN SHELL MODE THERE IS NO FLOOR, so `baseZ` stops being the lower
+  // surface and becomes only what the result REPORTS as its lowest point: the
+  // deepest the skin reaches, which is the low ground minus the shell.
+  const baseZ = minZ * ex - (shell || thickness);
 
   // ── the vertex pool: one entry per (cell, layer), created on demand ─────
   /** @type {Map<number, number>} */ const pool = new Map();
@@ -282,8 +303,13 @@ export function writeSurfaceSolidOBJ(dem, opts = {}) {
     let v = pool.get(key);
     if (v !== undefined) return v;
     const r = (i / ncols) | 0, c = i % ncols;
+    // ⚠️ THE LOWER SURFACE IS THE ONLY DIFFERENCE BETWEEN A SOLID AND A SHELL.
+    // Flat at baseZ, the body is filled and stands on its floor; following the
+    // terrain at `shell` below it, the body is a skin. The triangulation, the
+    // rim walls and the proof of closure do not know which one they are making.
+    const inner = shell ? z[i] * ex - shell : baseZ;
     verts.push([(c + 0.5) * cell, northY - (r + 0.5) * cell,
-      layer === 0 ? z[i] * ex : baseZ]);
+      layer === 0 ? z[i] * ex : inner]);
     vertCell.push(i);
     v = verts.length - 1;
     pool.set(key, v);
@@ -351,6 +377,31 @@ export function writeSurfaceSolidOBJ(dem, opts = {}) {
     walls += 2;
   }
 
+  // ⚠️ THE THINNEST WALL, MEASURED, NOT PROMISED. A vertical offset leaves
+  // t·cos(slope) perpendicular to the surface, so the steepest cell on the tile
+  // decides what the model is actually printed at. Compared against a printer's
+  // minimum feature size, this is the number that matters — not the one typed
+  // into the field.
+  let maxSlopeDeg = null, minWall = null;
+  if (shell) {
+    let maxGrad = 0;
+    for (let r = 0; r < nrows; r++) {
+      for (let c = 0; c < ncols; c++) {
+        const i = r * ncols + c;
+        if (!finite(i)) continue;
+        const e = c + 1 < ncols ? i + 1 : i, w = c > 0 ? i - 1 : i;
+        const so = r + 1 < nrows ? i + ncols : i, no = r > 0 ? i - ncols : i;
+        if (!finite(e) || !finite(w) || !finite(so) || !finite(no)) continue;
+        const dzdx = ((z[e] - z[w]) * ex) / ((e === i || w === i ? 1 : 2) * cell);
+        const dzdy = ((z[so] - z[no]) * ex) / ((so === i || no === i ? 1 : 2) * cell);
+        const g = Math.hypot(dzdx, dzdy);
+        if (g > maxGrad) maxGrad = g;
+      }
+    }
+    maxSlopeDeg = (Math.atan(maxGrad) * 180) / Math.PI;
+    minWall = shell / Math.sqrt(1 + maxGrad * maxGrad);
+  }
+
   // ── out ────────────────────────────────────────────────────────────────
   const out = [];
   out.push("# DL-TerrainDiversity — SOLID surface export (closed, for printing)");
@@ -362,11 +413,17 @@ export function writeSurfaceSolidOBJ(dem, opts = {}) {
   out.push(ex === 1
     ? "# vertical_exaggeration 1 (true elevations)"
     : `# vertical_exaggeration ${ex} — Z IS NOT TRUE ELEVATION, divide by ${ex}`);
-  out.push(`# base_thickness ${thickness} (material below the lowest ground)`);
+  if (shell) {
+    out.push(`# shell ${shell} (a skin of this thickness, measured vertically)`);
+    out.push(`# min_wall ${minWall.toFixed(4)} perpendicular, at the steepest `
+      + `cell (${maxSlopeDeg.toFixed(1)} degrees) — compare with your printer`);
+  } else {
+    out.push(`# base_thickness ${thickness} (material below the lowest ground)`);
+  }
   out.push(`# floor_z ${baseZ.toFixed(4)}`);
   if (opts.layerLabel) out.push(`# layer ${opts.layerLabel}`);
   out.push("# Terrain data (c) Kartverket, hoydedata.no, NLOD / CC BY 4.0");
-  out.push("o terrain_solid");
+  out.push(shell ? "o terrain_shell" : "o terrain_solid");
   for (const [x, y, zz] of verts) {
     out.push(`v ${x.toFixed(4)} ${y.toFixed(4)} ${zz.toFixed(4)}`);
   }
@@ -388,6 +445,9 @@ export function writeSurfaceSolidOBJ(dem, opts = {}) {
     baseZ,
     size: [x1 - x0, y1 - y0, maxZ * ex - baseZ],
     dropped,
+    shell: shell || null,
+    minWall,
+    maxSlopeDeg,
   };
 }
 
