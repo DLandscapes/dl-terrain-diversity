@@ -9070,7 +9070,6 @@ function syncPrintUI() {
   const on = $("t-print").classList.contains("on");
   $("t-print").textContent = on ? "On" : "Off";
   $("print-body").hidden = !on;
-  $("b-print").textContent = on ? "armed" : "";
 }
 $("t-print").addEventListener("click", () => {
   $("t-print").classList.toggle("on");
