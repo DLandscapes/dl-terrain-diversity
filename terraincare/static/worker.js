@@ -22,7 +22,7 @@ import { DEM } from "./dem.js";
 import { computeGradient } from "./analysis/horn.js";
 import { flowAccumulation } from "./analysis/mfd.js";
 import { twi, tri, findDepressions, geodiversityFromTRI } from "./analysis/indices.js";
-import { colourise, colouriseClasses, percentileDomain } from "./analysis/ramps.js";
+import { colourise, colouriseClasses, percentileDomain, resolveStops } from "./analysis/ramps.js";
 import { horizonMap, skyViewFactor, positiveOpenness, windExposure } from "./analysis/horizon.js";
 import { solarRadiation } from "./analysis/solar.js";
 import { geomorphons } from "./analysis/geomorphons.js";
@@ -52,7 +52,7 @@ let lastGrids = null;
  * the panel and the 3D surface two different ideas of the same layer.
  * @type {{stretch: Record<string, number[]>, variant: Record<string, string>}}
  */
-let view = { stretch: {}, variant: {}, isolate: {}, band: {} };
+let view = { stretch: {}, variant: {}, isolate: {}, band: {}, scheme: {}, ends: {} };
 /**
  * Landform classes from the last settled pass, as the Uint8 codes the species
  * model wants. lastGrids.geomorphon holds the same thing widened to float32 for
@@ -126,6 +126,21 @@ function cuts(key, lo, hi) {
   // nonsense, and the layer would read as empty rather than as reversed. The
   // inversion is carried by invertedFor() and applied to the COLOUR mapping.
   return s ? [Math.min(s[0], s[1]), Math.max(s[0], s[1])] : [lo, hi];
+}
+
+/**
+ * The stops this layer is drawn with: its committed ramp, a chosen scheme over
+ * it, and a reader's own colour on either end.
+ *
+ * ⚠️ RESOLVED HERE, NOT IN colourise, so the panels and the legend cannot drift
+ * apart: the app asks ramps.js the same question with the same three inputs.
+ * @param {string} key
+ */
+function stopsFor(key) {
+  const scheme = view.scheme[key] || null;
+  const ends = view.ends[key] || null;
+  if (!scheme && !ends) return undefined;   // the committed ramp, untouched
+  return resolveStops(key, { variant: view.variant[key], scheme, ends });
 }
 
 /** Has the reader dragged this layer's handles past each other? */
@@ -314,14 +329,14 @@ function runPass(seq, wantPanels, heavy = false) {
     };
     const V = (k) => view.variant[k];
     const panels = {
-      elevation: colourise("elevation", dem.z, dirDom("elevation", dom.elevation), V("elevation"), bandFor("elevation", dom.elevation)),
-      slope: colourise("slope", gradient.slopeDeg, dirDom("slope", dom.slope), V("slope"), bandFor("slope", dom.slope)),
-      aspect: colourise("aspect", aspectDeg, undefined, V("aspect"), bandFor("aspect", undefined)),
-      twi: colourise("twi", twiGrid, dirDom("twi", dom.twi), V("twi"), bandFor("twi", dom.twi)),
-      catchment: colourise("catchment", logCatchment, dirDom("catchment", dom.catchment), V("catchment"), bandFor("catchment", dom.catchment)),
-      cutfill: colourise("cutfill", delta, dirDom("cutfill", dom.cutfill), V("cutfill"), bandFor("cutfill", dom.cutfill)),
-      tri: colourise("tri", triGrid, dirDom("tri", dom.tri), V("tri"), bandFor("tri", dom.tri)),
-      depression: colourise("depression", depth, dirDom("depression", dom.depression), V("depression"), bandFor("depression", dom.depression)),
+      elevation: colourise("elevation", dem.z, dirDom("elevation", dom.elevation), V("elevation"), bandFor("elevation", dom.elevation), stopsFor("elevation")),
+      slope: colourise("slope", gradient.slopeDeg, dirDom("slope", dom.slope), V("slope"), bandFor("slope", dom.slope), stopsFor("slope")),
+      aspect: colourise("aspect", aspectDeg, undefined, V("aspect"), bandFor("aspect", undefined), stopsFor("aspect")),
+      twi: colourise("twi", twiGrid, dirDom("twi", dom.twi), V("twi"), bandFor("twi", dom.twi), stopsFor("twi")),
+      catchment: colourise("catchment", logCatchment, dirDom("catchment", dom.catchment), V("catchment"), bandFor("catchment", dom.catchment), stopsFor("catchment")),
+      cutfill: colourise("cutfill", delta, dirDom("cutfill", dom.cutfill), V("cutfill"), bandFor("cutfill", dom.cutfill), stopsFor("cutfill")),
+      tri: colourise("tri", triGrid, dirDom("tri", dom.tri), V("tri"), bandFor("tri", dom.tri), stopsFor("tri")),
+      depression: colourise("depression", depth, dirDom("depression", dom.depression), V("depression"), bandFor("depression", dom.depression), stopsFor("depression")),
     };
     msg.panels = panels;
     msg.domains = dom;
@@ -379,10 +394,10 @@ function runPass(seq, wantPanels, heavy = false) {
       svfGrid: svf,
       domains: hdom,
       panels: {
-        svf: colourise("svf", svf, dirDom("svf", hdom.svf), view.variant.svf, bandFor("svf", hdom.svf)),
-        openness: colourise("openness", openness, dirDom("openness", hdom.openness), view.variant.openness, bandFor("openness", hdom.openness)),
-        solar: colourise("solar", sun.grid, dirDom("solar", hdom.solar), view.variant.solar, bandFor("solar", hdom.solar)),
-        wind: colourise("wind", wind, dirDom("wind", hdom.wind), view.variant.wind, bandFor("wind", hdom.wind)),
+        svf: colourise("svf", svf, dirDom("svf", hdom.svf), view.variant.svf, bandFor("svf", hdom.svf), stopsFor("svf")),
+        openness: colourise("openness", openness, dirDom("openness", hdom.openness), view.variant.openness, bandFor("openness", hdom.openness), stopsFor("openness")),
+        solar: colourise("solar", sun.grid, dirDom("solar", hdom.solar), view.variant.solar, bandFor("solar", hdom.solar), stopsFor("solar")),
+        wind: colourise("wind", wind, dirDom("wind", hdom.wind), view.variant.wind, bandFor("wind", hdom.wind), stopsFor("wind")),
         // Classes, not a continuum — no domain, no stretch.
         geomorphon: colouriseClasses("geomorphon", gm.codes),
         // ⚠️ Its OWN colouriser, not colouriseClasses. Basin ids are nominal
@@ -590,6 +605,8 @@ self.onmessage = (e) => {
       variant: m.variant || {},
       isolate: m.isolate || {},
       band: m.band || {},
+      scheme: m.scheme || {},
+      ends: m.ends || {},
     };
     if (!lastGrids || !dem) return;
     const t0 = performance.now();
@@ -632,11 +649,11 @@ self.onmessage = (e) => {
       const d = percentileDomain(g, ...cuts(k, ...DEFAULTS[k]), opt[k])
         ?? (k === "elevation" ? flatDomain(g) : undefined);
       domains[k] = d;
-      panels[k] = colourise(k, g, dirDom(k, d), view.variant[k], bandFor(k, d));
+      panels[k] = colourise(k, g, dirDom(k, d), view.variant[k], bandFor(k, d), stopsFor(k));
     }
     if (lastGrids.aspect) {
       panels.aspect = colourise("aspect", lastGrids.aspect, undefined,
-        view.variant.aspect, bandFor("aspect", undefined));
+        view.variant.aspect, bandFor("aspect", undefined), stopsFor("aspect"));
     }
     // @ts-ignore - worker global
     self.postMessage({ type: "recolour", seq: m.seq ?? 0, panels, domains,

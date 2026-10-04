@@ -21,7 +21,8 @@ import { Ledger } from "./brush.js";
 import { Stroke } from "./stroke.js";
 import { localStats } from "./local.js";
 import { AnalysisClient } from "./analysis-client.js";
-import { RAMPS, CATEGORICAL, variantsFor, sample, colouriseClasses } from "./analysis/ramps.js";
+import { RAMPS, CATEGORICAL, variantsFor, variantStops, sample, colouriseClasses,
+  resolveStops, SCHEMES } from "./analysis/ramps.js";
 import { SPECIES, SHANNON_MAX } from "./analysis/species.js";
 import * as Substrate from "./substrate.js";
 import { hillshade } from "./analysis/hillshade.js";
@@ -190,6 +191,18 @@ const state = {
    */
   /** @type {Record<string, boolean>} */ isolate: {},
   /** @type {Record<string, number[]>} */ band: {},
+  /**
+   * A ready-made scheme laid over a layer's own ramp, and a reader's own colour
+   * on either end.
+   *
+   * ⚠️ SEPARATE FROM `variant`, deliberately. A variant restyles the ramp its
+   * author committed to and can never reverse which end is warm; a scheme
+   * replaces those colours with somebody else's, so that guarantee cannot
+   * follow it. Two channels keep the promise the variants make from being
+   * quietly weakened by the schemes.
+   */
+  /** @type {Record<string, string|null>} */ scheme: {},
+  /** @type {Record<string, {lo?: number[]|null, hi?: number[]|null}>} */ ends: {},
   /** pristine copy, for reset and for the datum */
   /** @type {Float32Array|null} */ baseZ: null,
   datum: 0,
@@ -607,6 +620,21 @@ const DEFAULT_CUTS = {
 const stretchPlacers = [];
 function refreshStretchHandles() { for (const p of stretchPlacers) p.fn(); }
 /**
+ * The stops a layer is drawn with, asked the same way the worker asks it.
+ *
+ * ⚠️ IF THE LEGEND RESOLVED THESE DIFFERENTLY FROM worker.js, the swatch would
+ * describe a palette the map is not drawn in — which is the exact wording of
+ * the warning already sitting on the figure export.
+ * @param {string} k
+ */
+function stopsFor(k) {
+  const scheme = state.scheme[k] || null;
+  const ends = state.ends[k] || null;
+  if (!scheme && !ends) return undefined;
+  return resolveStops(k, { variant: state.variant[k], scheme, ends });
+}
+
+/**
  * Is this layer's ramp running backwards?
  *
  * ⚠️ ONE DEFINITION, because the answer has to be the same in the legend, in
@@ -625,6 +653,145 @@ function dropPlacersFor(el) {
   for (let i = stretchPlacers.length - 1; i >= 0; i--) {
     if (stretchPlacers[i].el === el) stretchPlacers.splice(i, 1);
   }
+}
+
+/**
+ * THE RAMP CONTROLS: which colours this layer is drawn in, and the two ends.
+ *
+ * Marc, 2026-10-04: "I can not see the option to change the colour ramp — or
+ * the colours of it." He was right twice over. The only control that existed
+ * was a text button reading "palette · contrast ▾", which cycles four
+ * RESTYLINGS of the ramp the layer was born with — and it was built inside
+ * addStretchHandles, which returns early for a layer with nothing to stretch,
+ * so ASPECT had no palette control at all.
+ *
+ * ⚠️ VISIBLE, NOT CYCLED. A button that changes one thing per click never says
+ * what the other options are; a reader has to press it four times to find out,
+ * and cannot go back one. The schemes are a list, and the two colours are
+ * swatches that look like what they do.
+ *
+ * ⚠️ THE END SWATCHES ARE THE RAMP'S ENDS, NOT THE HANDLES' POSITIONS. Dragging
+ * a handle re-cuts which VALUES the ramp spans; these change what COLOUR each
+ * end is. Clicking a handle opens its swatch, because that is where a reader
+ * looks for it — but the two are different operations and the tooltips say so.
+ *
+ * @param {Element} el @param {string} k
+ */
+function addRampControls(el, k) {
+  const meta = LEGEND[k];
+  if (!meta || meta.categorical || !RAMPS[k]) return;
+  if (el.querySelector(".palrow")) return;
+  const bar = el.querySelector(".bar");
+  if (!bar) return;
+
+  const row = document.createElement("div");
+  row.className = "palrow";
+
+  const toHex = (c) => "#" + c.map((n) =>
+    Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, "0")).join("");
+  const fromHex = (h) => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16),
+    parseInt(h.slice(5, 7), 16)];
+
+  /** The colour each end is CURRENTLY drawn in, whatever produced it. */
+  const endColour = (which) => {
+    const stops = stopsFor(k) || variantStops(k, state.variant[k]);
+    return stops[which === "lo" ? 0 : stops.length - 1][1];
+  };
+
+  const swatch = (which) => {
+    const inp = /** @type {HTMLInputElement} */ (document.createElement("input"));
+    inp.type = "color";
+    inp.className = "endsw " + which;
+    inp.title = which === "lo"
+      ? "the colour at the LOW end of this ramp — click for a colour wheel or RGB"
+      : "the colour at the HIGH end of this ramp — click for a colour wheel or RGB";
+    inp.addEventListener("pointerdown", (e) => e.stopPropagation());
+    inp.addEventListener("input", (e) => {
+      e.stopPropagation();
+      const cur = state.ends[k] || {};
+      state.ends[k] = { ...cur, [which]: fromHex(inp.value) };
+      refresh();
+      pushView();
+    });
+    return inp;
+  };
+  const swLo = swatch("lo");
+  const swHi = swatch("hi");
+
+  const sel = /** @type {HTMLSelectElement} */ (document.createElement("select"));
+  sel.className = "scheme";
+  sel.title = "the colours this layer is drawn in";
+  sel.add(new Option("its own ramp", ""));
+  for (const [id, sc] of Object.entries(SCHEMES)) sel.add(new Option(sc.label, id));
+  sel.addEventListener("pointerdown", (e) => e.stopPropagation());
+  sel.addEventListener("change", (e) => {
+    e.stopPropagation();
+    state.scheme[k] = sel.value || null;
+    // ⚠️ A NEW SCHEME CLEARS THE HAND-PICKED ENDS. They were chosen against the
+    // colours that were there; carried over, they sit on a ramp they were never
+    // judged against and the reader cannot tell which part they picked.
+    delete state.ends[k];
+    refresh();
+    pushView();
+    status(`${layerTitle(k)}: ${sel.value ? SCHEMES[sel.value].label : "its own ramp"}`);
+  });
+
+  // the four restylings the layer's own ramp can take, kept as a list too
+  const pal = /** @type {HTMLSelectElement} */ (document.createElement("select"));
+  pal.className = "pal";
+  pal.title = "a restyling of this ramp — never reverses which end is warm";
+  for (const v of variantsFor(k)) pal.add(new Option(v, v));
+  pal.addEventListener("pointerdown", (e) => e.stopPropagation());
+  pal.addEventListener("change", (e) => {
+    e.stopPropagation();
+    state.variant[k] = pal.value;
+    refresh();
+    pushView();
+    status(`${layerTitle(k)} palette: ${pal.value}`);
+  });
+
+  const reset = document.createElement("button");
+  reset.className = "rampreset";
+  reset.textContent = "reset";
+  reset.title = "back to the colours this layer was designed with";
+  reset.addEventListener("pointerdown", (e) => e.stopPropagation());
+  reset.addEventListener("click", (e) => {
+    e.stopPropagation();
+    delete state.scheme[k];
+    delete state.ends[k];
+    delete state.variant[k];
+    refresh();
+    pushView();
+    status(`${layerTitle(k)}: back to its own colours`);
+  });
+
+  row.append(swLo, sel, pal, swHi, reset);
+  const ends = el.querySelector(".ends");
+  if (ends) ends.insertAdjacentElement("afterend", row);
+  else el.appendChild(row);
+
+  /** Redraw the legend so the bar shows what was just chosen. */
+  function refresh() {
+    fillLegend(/** @type {any} */ (el), k);
+  }
+
+  const place = () => {
+    swLo.value = toHex(endColour("lo"));
+    swHi.value = toHex(endColour("hi"));
+    sel.value = state.scheme[k] || "";
+    pal.value = state.variant[k] || DEFAULT_VARIANT;
+    const touched = !!state.scheme[k] || !!state.ends[k]
+      || (!!state.variant[k] && state.variant[k] !== DEFAULT_VARIANT);
+    reset.hidden = !touched;
+    row.classList.toggle("adjusted", touched);
+  };
+  place();
+  stretchPlacers.push({ el, fn: place });
+
+  // Clicking a handle opens the swatch for THAT end — where a reader looks.
+  const handles = el.querySelectorAll(".handles .h");
+  if (handles[0]) handles[0].addEventListener("dblclick", () => swLo.click());
+  if (handles[1]) handles[1].addEventListener("dblclick", () => swHi.click());
 }
 
 /**
@@ -862,32 +1029,10 @@ function addStretchHandles(el, k) {
   wrap.append(lo, hi);
   bar.insertAdjacentElement("afterend", wrap);
 
-  // ⚠️ The palette control gets a ROW OF ITS OWN, below the value labels.
-  // It was first placed at the right end of the handle row, where its box
-  // (256–265 px) sat directly on top of the upper handle's (254–262) and
-  // swallowed every pointer event aimed at it — so the left triangle dragged
-  // and the right one appeared dead. Absolute-positioning a control into a
-  // track that another control already occupies is the whole bug; nothing
-  // else shares this row.
-  //
-  // It also carries a WORD. As a bare "▾" nobody found it, which is the other
-  // half of the same report.
-  const palRow = document.createElement("div");
-  palRow.className = "palrow";
-  const pal = document.createElement("button");
-  pal.className = "pal";
-  pal.title = "click to cycle the palette for this layer";
-  palRow.appendChild(pal);
-  const ends = el.querySelector(".ends");
-  if (ends) ends.insertAdjacentElement("afterend", palRow);
-  else wrap.insertAdjacentElement("afterend", palRow);
-
   const place = () => {
     const [a, b] = state.stretch[k] || DEFAULT_CUTS[k];
     lo.style.left = `${a * 100}%`;
     hi.style.left = `${b * 100}%`;
-    const v = state.variant[k] || DEFAULT_VARIANT;
-    pal.textContent = `palette · ${v} ▾`;
     wrap.classList.toggle("adjusted",
       !!state.stretch[k] || (!!state.variant[k] && state.variant[k] !== DEFAULT_VARIANT));
 
@@ -975,20 +1120,6 @@ function addStretchHandles(el, k) {
   drag(lo, 0);
   drag(hi, 1);
 
-  pal.addEventListener("pointerdown", (e) => e.stopPropagation());
-  pal.addEventListener("click", (e) => {
-    e.stopPropagation();
-    // Only the variants this ramp can safely take — a diverging ramp is not
-    // offered "mono", because one hue would make its two ends the same.
-    const opts = variantsFor(k);
-    const cur = state.variant[k] || DEFAULT_VARIANT;
-    const next = opts[(Math.max(0, opts.indexOf(cur)) + 1) % opts.length];
-    state.variant[k] = next;
-    place();
-    pushView();
-    status(`${layerTitle(k)} palette: ${next}`);
-  });
-
   // Double-click either handle to go back to the layer's own defaults.
   for (const h of [lo, hi]) {
     h.addEventListener("dblclick", (e) => {
@@ -1005,7 +1136,8 @@ function addStretchHandles(el, k) {
 /** Send the current display settings to the worker for a re-colour. */
 function pushView() {
   state.analysis?.setView({ stretch: state.stretch, variant: state.variant,
-    isolate: state.isolate, band: state.band });
+    isolate: state.isolate, band: state.band, scheme: state.scheme,
+    ends: state.ends });
 }
 
 /** Fill any legend element for a layer. Shared by the panel hovers and the
@@ -1047,7 +1179,7 @@ function fillLegend(el, k) {
   const stops = [];
   for (let i = 0; i <= 12; i++) {
     const v = lo + ((hi - lo) * i) / 12;
-    const [r, g, b] = sample(k, v, gdom, state.variant[k]);
+    const [r, g, b] = sample(k, v, gdom, state.variant[k], stopsFor(k));
     stops.push(`rgb(${r},${g},${b}) ${(i / 12 * 100).toFixed(0)}%`);
   }
   el.classList.toggle("inverted", inv);
@@ -1075,6 +1207,7 @@ function fillLegend(el, k) {
     el.dataset.controlsFor = k;
   }
   addStretchHandles(el, k);
+  addRampControls(el, k);
   addBandControls(el, k);
 
   const ends = el.querySelectorAll(".ends span");
@@ -8765,7 +8898,8 @@ function buildFigure(key) {
       // the ramp; a swatch drawn the right way round beside a reversed map is
       // the precise failure the crossing used to be banned to prevent — except
       // on paper, where there is no handle to look at.
-      const [r, g, b] = sample(key, v, /** @type {any} */ (figDom), state.variant[key]);
+      const [r, g, b] = sample(key, v, /** @type {any} */ (figDom), state.variant[key],
+        stopsFor(key));
       stops.push([r, g, b]);
     }
   }

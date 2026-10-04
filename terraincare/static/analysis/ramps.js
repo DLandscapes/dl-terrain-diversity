@@ -441,6 +441,112 @@ export function colouriseClasses(id, grid) {
  * dry end, because nothing here can move a stop. Restyling is therefore free
  * and inversion is unreachable, rather than merely discouraged.
  */
+/**
+ * READY-MADE SCHEMES a reader can put on any continuous layer.
+ *
+ * Marc, 2026-10-04: "perhaps there should also be a few default colour ramps to
+ * choose from that can be applied instead of the current one" — and separately
+ * "I can not see the option to change the colour ramp, or the colours of it".
+ *
+ * ⚠️ A SCHEME IS NOT A VARIANT, and the distinction is load-bearing. A variant
+ * restyles the ramp its author committed to, and is held to a rule: it can
+ * never reverse which end is warm, so no amount of restyling can make cut read
+ * as fill. A scheme REPLACES those colours with somebody else's, so that rule
+ * cannot apply to it — viridis runs dark-cool to light-warm whatever the ramp
+ * underneath it did. Keeping them in separate channels is what stops a scheme
+ * quietly weakening the guarantee the variants carry.
+ *
+ * ⚠️ THEY ARE RESAMPLED ONTO THE RAMP'S OWN STOP POSITIONS, so a scheme keeps
+ * the number and placement of stops the layer was designed with. A diverging
+ * layer keeps its midpoint where its author put it.
+ *
+ * viridis, magma and cividis are from matplotlib, released into the public
+ * domain (CC0) by Stéfan van der Walt, Nathaniel Smith and Eric Firing; cividis
+ * is by Nuñez, Anderton and Renslow. Carried here as sampled stops, not as
+ * code. The two others are this tool's own.
+ */
+export const SCHEMES = {
+  viridis: {
+    label: "viridis — dark blue to yellow",
+    stops: [[0, [68, 1, 84]], [0.25, [59, 82, 139]], [0.5, [33, 145, 140]],
+      [0.75, [94, 201, 98]], [1, [253, 231, 37]]],
+  },
+  magma: {
+    label: "magma — black to cream",
+    stops: [[0, [0, 0, 4]], [0.25, [80, 18, 123]], [0.5, [182, 54, 121]],
+      [0.75, [251, 136, 97]], [1, [252, 253, 191]]],
+  },
+  cividis: {
+    label: "cividis — blue to gold, colour-blind safe",
+    stops: [[0, [0, 32, 76]], [0.25, [68, 82, 115]], [0.5, [124, 123, 120]],
+      [0.75, [182, 172, 106]], [1, [255, 233, 69]]],
+  },
+  // ⚠️ THE ONLY DIVERGING SCHEME, and it keeps a pale middle on purpose: a
+  // diverging ramp whose centre is saturated hides the value the two halves
+  // are measured FROM.
+  bluered: {
+    label: "blue – red — diverging through pale",
+    stops: [[0, [33, 102, 172]], [0.25, [103, 169, 207]], [0.5, [247, 247, 247]],
+      [0.75, [214, 96, 77]], [1, [178, 24, 43]]],
+  },
+  grey: {
+    label: "grey — ink only, for print",
+    stops: [[0, [250, 250, 248]], [0.5, [150, 150, 148]], [1, [26, 26, 24]]],
+  },
+};
+
+/** The scheme's colour at a position, linearly between its own stops. */
+function schemeAt(name, t) {
+  const sc = SCHEMES[name];
+  const st = sc.stops;
+  const x = Math.min(1, Math.max(0, t));
+  for (let i = 0; i < st.length - 1; i++) {
+    const [p0, c0] = st[i], [p1, c1] = st[i + 1];
+    if (x >= p0 && x <= p1) {
+      const f = p1 === p0 ? 0 : (x - p0) / (p1 - p0);
+      return [Math.round(c0[0] + (c1[0] - c0[0]) * f),
+        Math.round(c0[1] + (c1[1] - c0[1]) * f),
+        Math.round(c0[2] + (c1[2] - c0[2]) * f)];
+    }
+  }
+  return st[st.length - 1][1].slice();
+}
+
+/**
+ * The stops a layer should actually be drawn with.
+ *
+ * Three things can modify them, in this order: the committed ramp, a scheme
+ * laid over it, then a reader's own colour on either end.
+ *
+ * ⚠️ CUSTOM COLOURS OVERRIDE THE ENDS ONLY, keeping every stop in between. The
+ * alternative — a straight line from one chosen colour to the other — throws
+ * away the shape the ramp's author built, and on a hypsometric elevation ramp
+ * that shape is most of the information.
+ *
+ * @param {string} id
+ * @param {{variant?: string, scheme?: string|null,
+ *          ends?: {lo?: number[]|null, hi?: number[]|null}|null}} [o]
+ */
+export function resolveStops(id, o = {}) {
+  const ramp = RAMPS[id];
+  if (!ramp) throw new Error(`unknown ramp "${id}"`);
+  let stops = variantStops(id, o.variant);
+  if (o.scheme && SCHEMES[o.scheme]) {
+    stops = stops.map(([p]) => [p, schemeAt(/** @type {string} */ (o.scheme), p)]);
+  }
+  const ends = o.ends;
+  if (ends && (ends.lo || ends.hi)) {
+    stops = stops.map((st) => [st[0], st[1].slice()]);
+    if (ends.lo) stops[0][1] = ends.lo.slice();
+    if (ends.hi) stops[stops.length - 1][1] = ends.hi.slice();
+    // ⚠️ A CIRCULAR RAMP MUST CLOSE. Its first and last stop are the same
+    // bearing; letting a reader colour them differently puts a seam at north
+    // that reads as a cliff in the data.
+    if (ramp.circular) stops[stops.length - 1][1] = stops[0][1].slice();
+  }
+  return stops;
+}
+
 export const RAMP_VARIANTS = ["committed", "muted", "mono", "contrast"];
 
 /**
@@ -525,7 +631,7 @@ export function variantStops(id, variant) {
  * @param {string} [variant] palette variant, default the committed ramp
  * @returns {[number, number, number, number]} RGBA, 0-255
  */
-export function sample(id, value, domain, variant) {
+export function sample(id, value, domain, variant, stops) {
   const ramp = RAMPS[id];
   if (!ramp) throw new Error(`unknown ramp "${id}"`);
   if (!Number.isFinite(value)) {
@@ -543,7 +649,7 @@ export function sample(id, value, domain, variant) {
   if (ramp.circular) t = ((t % 1) + 1) % 1;
   else t = Math.min(1, Math.max(0, t));
 
-  const stops = variantStops(id, variant);
+  stops = stops || variantStops(id, variant);
   for (let k = 0; k < stops.length - 1; k++) {
     const [p0, c0] = stops[k];
     const [p1, c1] = stops[k + 1];
@@ -576,13 +682,13 @@ const LUT_SIZE = 512;
  * @param {[number, number]} [domain]
  * @param {string} [variant]
  */
-export function makeLUT(id, domain, variant) {
+export function makeLUT(id, domain, variant, stops) {
   const ramp = RAMPS[id];
   const [lo, hi] = domain ?? ramp.domain;
   const lut = new Uint8ClampedArray(LUT_SIZE * 3);
   for (let k = 0; k < LUT_SIZE; k++) {
     const v = lo + ((hi - lo) * k) / (LUT_SIZE - 1);
-    const [r, g, b] = sample(id, v, domain, variant);
+    const [r, g, b] = sample(id, v, domain, variant, stops);
     lut[k * 3] = r; lut[k * 3 + 1] = g; lut[k * 3 + 2] = b;
   }
   return { lut, lo, hi, circular: !!ramp.circular, diverging: lo < 0 && hi > 0 };
@@ -600,10 +706,10 @@ export function makeLUT(id, domain, variant) {
  *   expressed. See band.js, which both this and the Select panel read.
  * @returns {Uint8ClampedArray} length grid.length*4
  */
-export function colourise(id, grid, domain, variant, band = null) {
+export function colourise(id, grid, domain, variant, band = null, stops) {
   const n = grid.length;
   const out = new Uint8ClampedArray(n * 4);
-  const { lut, lo, hi, circular, diverging } = makeLUT(id, domain, variant);
+  const { lut, lo, hi, circular, diverging } = makeLUT(id, domain, variant, stops);
   const span = hi - lo;
   const scale = span === 0 ? 0 : (LUT_SIZE - 1) / span;
   const [nr, ng, nb] = NODATA_RGB;

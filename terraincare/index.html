@@ -903,7 +903,40 @@
   .legend .handles.inert .h { opacity: .28; pointer-events: none; }
   /* The palette control sits on its own row. It shared the handle row once and
      covered the upper handle, which made that handle undraggable. */
-  .legend .palrow { display: flex; justify-content: flex-end; margin-top: 3px; }
+  /* ⚠️ THE RAMP CONTROLS ARE VISIBLE, not cycled behind one button. The only
+     control here used to be a text button reading "palette · contrast ▾",
+     which changed one thing per click and never said what the alternatives
+     were — and it lived inside the handle builder, so a layer with nothing to
+     stretch (aspect) had no palette control at all. */
+  .legend .palrow {
+    display: flex; align-items: center; gap: 4px; margin-top: 4px;
+    pointer-events: auto;
+  }
+  .legend .palrow .scheme { flex: 1 1 auto; min-width: 0; }
+  .legend .palrow select {
+    padding: 1px 2px; border: 1px solid var(--line); border-radius: 3px;
+    background: var(--sheet); color: var(--ink-soft); cursor: pointer;
+    font-family: var(--font-head); font-size: .62rem; line-height: 1.3;
+    max-width: 100%;
+  }
+  .legend .palrow select:hover { color: var(--ink); border-color: var(--ink-soft); }
+  /* The two end colours, shown as what they are. A native colour input brings
+     the platform's own wheel and RGB fields, which is more than this sheet
+     should try to rebuild. */
+  .legend .palrow .endsw {
+    width: 20px; height: 16px; padding: 0; flex: 0 0 auto; cursor: pointer;
+    border: 1px solid var(--line); border-radius: 3px; background: none;
+  }
+  .legend .palrow .endsw::-webkit-color-swatch-wrapper { padding: 1px; }
+  .legend .palrow .endsw::-webkit-color-swatch { border: none; border-radius: 2px; }
+  .legend .palrow .rampreset {
+    padding: 1px 4px; border: 1px solid var(--line); border-radius: 3px;
+    background: var(--sheet); cursor: pointer; pointer-events: auto;
+    font-family: var(--font-head); font-size: .62rem; color: var(--ink-soft);
+  }
+  .legend .palrow .rampreset:hover { color: var(--ink); border-color: var(--ink-soft); }
+  .legend .palrow.adjusted .scheme { border-color: var(--ink-soft); color: var(--ink); }
+  .legend .palrow-old { display: flex; justify-content: flex-end; margin-top: 3px; }
   .legend .palrow .pal {
     padding: 1px 4px; border: 1px solid var(--line); border-radius: 3px;
     background: var(--sheet); cursor: pointer; pointer-events: auto;
