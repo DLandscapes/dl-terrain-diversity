@@ -1257,6 +1257,38 @@ export class View {
     );
   }
 
+  /**
+   * Where a screen point meets a horizontal plane, whether or not there is any
+   * terrain under it.
+   *
+   * ⚠️ THE RAYCAST ABOVE HITS THE MESH AND NOTHING ELSE, so a click beyond the
+   * tile returns null and every tool that asks for a point simply ignores it.
+   * For a section that is the wrong answer: a cut is a line across the ground,
+   * and the natural way to draw one is to start outside the tile, sweep over
+   * it, and finish outside on the other side — which was impossible.
+   *
+   * ⚠️ THE PLANE'S HEIGHT ONLY MATTERS IN A TILTED VIEW. Cutting happens in the
+   * locked plan camera, looking straight down, where every horizontal plane
+   * gives the same x and y. The caller passes the terrain's own mid-height so
+   * the answer stays sensible if the view is ever not level.
+   *
+   * @param {number} clientX @param {number} clientY
+   * @param {number} [z] plane height in world units
+   * @returns {THREE.Vector3 | null}
+   */
+  pickGround(clientX, clientY, z = 0) {
+    const r = this.canvas.getBoundingClientRect();
+    if (!r.width || !r.height) return null;
+    const ndc = new THREE.Vector2(
+      ((clientX - r.left) / r.width) * 2 - 1,
+      -((clientY - r.top) / r.height) * 2 + 1,
+    );
+    this._raycaster.setFromCamera(ndc, this.activeCamera);
+    const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -z);
+    const out = new THREE.Vector3();
+    return this._raycaster.ray.intersectPlane(plane, out) ? out : null;
+  }
+
   /** @returns {THREE.Vector3 | null} */
   pickNdc(ndcX, ndcY) {
     if (!this.pickTarget) return null;

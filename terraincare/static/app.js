@@ -2542,6 +2542,39 @@ function pickWorld(e) {
   return { x: hit.x, y: hit.y };
 }
 
+/**
+ * A point on the ground for a tool that may legitimately be aimed OFF the tile.
+ *
+ * Marc, 2026-10-04: "it should be possible to click outside of the mesh to the
+ * left, cross the mesh, and click to the right — and that should result in a
+ * section line that covers the whole mesh."
+ *
+ * ⚠️ ONLY THE SECTION TOOL GETS THIS. pickWorld raycasts the mesh and returns
+ * null off it, and for the brush, the guide and the point tools that is the
+ * right answer — painting ground that is not there, or dropping an attractor
+ * into empty space, are not operations. A cut is different: it is a line ACROSS
+ * the ground, and its ends are naturally beyond the edge.
+ *
+ * ⚠️ SAMPLING OUTSIDE THE GRID IS ALREADY SAFE. facetZAt returns NaN off the
+ * raster and sampleSection carries it, so the profile simply has no data past
+ * the edge — which is what a section running off the tile should look like.
+ * @param {PointerEvent|MouseEvent} e
+ */
+function pickWorldOrGround(e) {
+  const hit = pickWorld(e);
+  if (hit) return hit;
+  const dem = state.dem;
+  let z = 0;
+  if (dem) {
+    const [lo, hi] = dem.zRange();
+    if (Number.isFinite(lo) && Number.isFinite(hi)) {
+      z = ((lo + hi) / 2) * currentExaggeration();
+    }
+  }
+  const g = view.pickGround(e.clientX, e.clientY, z);
+  return g ? { x: g.x, y: g.y } : null;
+}
+
 let painting = false;
 let lastPaintT = 0;
 
@@ -3230,7 +3263,13 @@ function planPointerDown(e) {
   if (e.button !== 0 || e.altKey || e.ctrlKey || e.metaKey
       || (e.shiftKey && !shiftIsOurs)) return false;
   if (!state.dem || !state.surface) return false;
-  const hit = pickWorld(e);
+  // ⚠️⚠️ THE PRESS IS WHERE A GESTURE IS CLAIMED, AND IT WAS THE REAL BLOCKER.
+  // Letting planPointerUp accept a point off the tile achieves nothing on its
+  // own: this guard rejects a press that misses the mesh, `planGesture` is
+  // never set, and the release returns at its own guard before the tool is
+  // ever consulted. Both ends of the gesture have to agree that a section may
+  // begin beyond the edge — which is the whole point of cutting one.
+  const hit = state.plan.tool === "section" ? pickWorldOrGround(e) : pickWorld(e);
   if (!hit) return false;
 
   // try/catch as view.js does for its own capture: a synthetic pointer has no
@@ -3329,18 +3368,23 @@ function planPointerUp(e) {
   // A press that travelled is a pan the camera already handled, not a click.
   if (drag.moved >= 5) return;
 
-  const hit = pickWorld(e) ?? drag.at;
-  if (!hit) return;
-  if (p.tool === "edit") { selectRegion(pickRegion(p.set.regions, hit.x, hit.y)); return; }
+  // ⚠️ THE SECTION TOOL IS ASKED FIRST, AND ASKED DIFFERENTLY. It accepts a
+  // point beyond the tile; every other tool here does not, so the fallback must
+  // not be folded into the shared `hit` below.
   if (p.tool === "section") {
+    const sHit = pickWorldOrGround(e) ?? drag.at;
+    if (!sHit) return;
     // ⚠️ FROM THE EVENT, NOT FROM STORED STATE. `p.shift` is maintained by the
     // move handler and the key handlers, neither of which fires if the hand is
     // still between a keydown and a click — and the placement is the one moment
     // the answer has to be exactly right.
     p.shift = e.shiftKey;
-    sectionPlacepoint(hit.x, hit.y);
+    sectionPlacepoint(sHit.x, sHit.y);
     return;
   }
+  const hit = pickWorld(e) ?? drag.at;
+  if (!hit) return;
+  if (p.tool === "edit") { selectRegion(pickRegion(p.set.regions, hit.x, hit.y)); return; }
   if (p.tool === "guide") { guidePlaceVertex(hit.x, hit.y); return; }
   if (p.tool === "points") { attractPlacePoint(hit.x, hit.y); return; }
   planPlaceVertex(hit.x, hit.y);
@@ -8067,7 +8111,10 @@ $("viewport").addEventListener("pointermove", (e) => {
   const p = state.sections;
   if (!p.pending || state.plan.tool !== "section") return;
   p.shift = e.shiftKey;
-  const hit = pickWorld(e);
+  // ⚠️ THE SAME OFF-TILE FALLBACK THE PLACEMENT USES. Without it the rubber
+  // band stops dead at the edge of the mesh while the pointer carries on, so
+  // the second click lands somewhere the preview never showed.
+  const hit = pickWorldOrGround(e);
   if (!hit) return;
   p.hover = p.shift ? sectionConstrain(p.pending, hit.x, hit.y) : [hit.x, hit.y];
   refreshSectionPending();
