@@ -13,6 +13,8 @@
 //      tag, so the sentinel sweep below is the ONLY nodata path in practice,
 //      not a belt-and-braces extra. Do not delete it as dead code.
 
+import { inflate } from "./inflate.js";
+
 /** @typedef {{type:number, count:number, value:number[]|string}} TiffTagValue */
 
 const TYPE_SIZE = /** @type {Record<number, number>} */ ({
@@ -224,6 +226,92 @@ const NODATA_SENTINELS = [-9999.0, -32767.0, -32768.0, 3.4028235e38, -3.4028235e
  * downstream is unchanged and NaN remains the nodata marker.
  * @type {Record<string, {bytes: number, read: (dv: DataView, off: number, le: boolean) => number}>}
  */
+/**
+ * Undo a TIFF predictor, in place, over one tile or strip.
+ *
+ * A predictor is a reversible transform applied BEFORE compression so the
+ * compressor sees small, repetitive numbers instead of absolute heights. It is
+ * not optional decoration: skip it and the raster still decodes to the right
+ * SIZE, with plausible-looking values that are wrong everywhere. That is the
+ * failure this function exists to prevent, and it is why the reader refuses a
+ * predictor it does not understand rather than ignoring the tag.
+ *
+ * - **2, horizontal differencing** — each sample holds its difference from the
+ *   sample one pixel to its left, per channel. Integers only; the format does
+ *   not define it for floats.
+ * - **3, floating point** — TIFF Technical Note 3. Each row is first split into
+ *   byte planes, MOST SIGNIFICANT BYTE PLANE FIRST — by significance, not by
+ *   the file's byte order — and then those bytes are horizontally differenced.
+ *   Undoing it is therefore two steps in that order reversed: accumulate the
+ *   bytes, then de-interleave the planes back into samples.
+ *
+ * ⚠️ THE PLANES ARE RE-ASSEMBLED INTO THE FILE'S DECLARED BYTE ORDER, not the
+ * machine's, because the sample readers below are handed that same `little`
+ * flag. libtiff writes this branch against the HOST's endianness, which is the
+ * same thing only because it has already swapped the buffer. Only the
+ * little-endian path is verified here against GDAL; big-endian floats with
+ * predictor 3 are vanishingly rare and untested.
+ *
+ * @param {Uint8Array} bytes one decompressed block
+ * @param {number} rowBytes
+ * @param {number} rowCount
+ * @param {{predictor:number, samplesPerPixel:number, bps:number, little:boolean,
+ *          sampleFormat:number}} o
+ */
+function unpredict(bytes, rowBytes, rowCount, o) {
+  const { predictor, samplesPerPixel: spp, bps, little } = o;
+  if (predictor === 1) return;
+
+  if (predictor === 3) {
+    const wc = rowBytes / bps;
+    for (let r = 0; r < rowCount; r++) {
+      const base = r * rowBytes;
+      // the bytes were differenced with a lag of one PIXEL, which in the
+      // shuffled layout is `spp` bytes
+      for (let i = spp; i < rowBytes; i++) {
+        bytes[base + i] = (bytes[base + i] + bytes[base + i - spp]) & 0xff;
+      }
+      const tmp = bytes.slice(base, base + rowBytes);
+      for (let c = 0; c < wc; c++) {
+        for (let b = 0; b < bps; b++) {
+          bytes[base + bps * c + b] = little
+            ? tmp[(bps - 1 - b) * wc + c]   // LSB last plane
+            : tmp[b * wc + c];              // MSB first plane
+        }
+      }
+    }
+    return;
+  }
+
+  if (predictor === 2) {
+    if (o.sampleFormat === 3) {
+      throw new Error(
+        "TIFF predictor 2 (horizontal differencing) is not defined for floating " +
+        "point samples; a float raster should carry predictor 3 or none"
+      );
+    }
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const perRow = rowBytes / bps;
+    for (let r = 0; r < rowCount; r++) {
+      const base = r * rowBytes;
+      for (let i = spp; i < perRow; i++) {
+        const a = base + i * bps, b = base + (i - spp) * bps;
+        if (bps === 1) dv.setUint8(a, (dv.getUint8(a) + dv.getUint8(b)) & 0xff);
+        else if (bps === 2) dv.setUint16(a, (dv.getUint16(a, little) + dv.getUint16(b, little)) & 0xffff, little);
+        else if (bps === 4) dv.setUint32(a, (dv.getUint32(a, little) + dv.getUint32(b, little)) >>> 0, little);
+        else throw new Error(`predictor 2 with ${bps * 8}-bit samples is not supported`);
+      }
+    }
+    return;
+  }
+
+  throw new Error(
+    `unsupported TIFF predictor ${predictor}. Supported: 1 (none), ` +
+    `2 (horizontal differencing), 3 (floating point). ` +
+    `Convert with:  gdal_translate -co PREDICTOR=1 in.tif out.tif`
+  );
+}
+
 const SAMPLE_READERS = {
   "8:1": { bytes: 1, read: (dv, o) => dv.getUint8(o) },
   "8:2": { bytes: 1, read: (dv, o) => dv.getInt8(o) },
@@ -239,10 +327,9 @@ const SAMPLE_READERS = {
  * Read the single-band pixel plane, handling both tiled and (as a fallback)
  * simple single-strip layouts.
  *
- * Compression must still be `none` (1). Both real Ørndalen tiles are
- * uncompressed, and adding LZW or Deflate would mean either hand-writing a
- * decompressor or going async for DecompressionStream — neither worth it when
- * `gdal_translate` fixes it in one line. The error message says so.
+ * Handles uncompressed (1) and Deflate (8 and 32946) data, with predictors.
+ * ⚠️ LZW (5) IS STILL REFUSED. It is common in the wild, so the error names it
+ * and says what to run; it is a separate decoder, not a flag away.
  * @param {ArrayBuffer} buf
  * @param {Map<number, TiffTagValue>} tags
  * @param {boolean} little
@@ -259,10 +346,16 @@ function readPixels(buf, tags, little) {
   if (width === undefined || height === undefined) {
     throw new Error("TIFF missing ImageWidth/ImageLength");
   }
-  if (compression !== 1) {
+  const predictor = num(tags, 317) ?? 1;
+  // 8 is Adobe Deflate, 32946 the older "Deflate" code; both are zlib streams.
+  const DEFLATE = new Set([8, 32946]);
+  if (compression !== 1 && !DEFLATE.has(compression)) {
+    const name = { 5: "LZW", 6: "old-style JPEG", 7: "JPEG",
+      32773: "PackBits", 34925: "LZMA", 50000: "Zstd", 50001: "WebP" }[compression];
     throw new Error(
-      `unsupported TIFF compression ${compression} — this reader handles uncompressed rasters only. ` +
-      `Convert with:  gdal_translate -co COMPRESS=NONE in.tif out.tif`
+      `unsupported TIFF compression ${compression}${name ? ` (${name})` : ""} — ` +
+      `this reader handles uncompressed and Deflate rasters. ` +
+      `Convert with:  gdal_translate -co COMPRESS=DEFLATE in.tif out.tif`
     );
   }
   const fmt = SAMPLE_READERS[`${bitsPerSample}:${sampleFormat}`];
@@ -273,14 +366,65 @@ function readPixels(buf, tags, little) {
       `Convert with:  gdal_translate -ot Float32 -co COMPRESS=NONE in.tif out.tif`
     );
   }
-  if (planarConfig !== 1) {
-    throw new Error(`unsupported PlanarConfiguration ${planarConfig} (only chunky/interleaved is supported)`);
+  // PlanarConfiguration describes nothing when there is ONE sample per pixel:
+  // there is a single plane, so "separate" and "interleaved" are the same
+  // bytes, and TIFF 6.0 says the field is then irrelevant and need not be
+  // present at all. GDAL writes 2 on single-band rasters, and refusing it
+  // turned an ordinary 1 m DTM away at the door.
+  //
+  // ⚠️ WITH MORE THAN ONE BAND THE LAYOUTS REALLY DO DIFFER — separate planes
+  // are stored plane-major, so the strip arithmetic below would read band 0's
+  // rows out of the wrong place. That stays refused rather than silently
+  // misread.
+  if (planarConfig !== 1 && samplesPerPixel > 1) {
+    throw new Error(
+      `unsupported PlanarConfiguration ${planarConfig} with ${samplesPerPixel} bands ` +
+      `(only chunky/interleaved is supported for multi-band rasters). ` +
+      `Convert with:  gdal_translate -co INTERLEAVE=PIXEL in.tif out.tif`
+    );
   }
 
   const out = new Float32Array(width * height);
   const dv = new DataView(buf);
   const bps = fmt.bytes;
   const readSample = fmt.read;
+
+  /**
+   * The bytes of one tile or strip: decompressed if it has to be, un-predicted
+   * if it has to be, and otherwise read straight out of the file buffer with no
+   * copy at all — which is what every uncompressed raster did before and still
+   * does.
+   *
+   * ⚠️ AN UNCOMPRESSED BLOCK THAT CARRIES A PREDICTOR IS COPIED FIRST. Undoing
+   * the predictor is destructive, and `buf` is the caller's file.
+   * @param {number} off @param {number} byteCount
+   * @param {number} rowSamples pixels across one stored row
+   * @param {number} rowCount rows stored in this block
+   * @param {string} what for the error message
+   */
+  const block = (off, byteCount, rowSamples, rowCount, what) => {
+    const rowBytes = rowSamples * samplesPerPixel * bps;
+    const wanted = rowBytes * rowCount;
+    if (compression === 1) {
+      if (off + wanted > buf.byteLength) {
+        throw new Error(`${what}: runs past the end of the file ` +
+          `(needs ${wanted} bytes at ${off}, file is ${buf.byteLength})`);
+      }
+      if (predictor === 1) return { view: dv, base: off };
+      const copy = new Uint8Array(buf.slice(off, off + wanted));
+      unpredict(copy, rowBytes, rowCount, { predictor, samplesPerPixel, bps, little, sampleFormat });
+      return { view: new DataView(copy.buffer), base: 0 };
+    }
+    if (off + byteCount > buf.byteLength) {
+      throw new Error(`${what}: compressed data runs past the end of the file`);
+    }
+    const raw = inflate(new Uint8Array(buf, off, byteCount), wanted);
+    if (raw.length < wanted) {
+      throw new Error(`${what}: decompressed to ${raw.length} bytes, expected ${wanted}`);
+    }
+    unpredict(raw, rowBytes, rowCount, { predictor, samplesPerPixel, bps, little, sampleFormat });
+    return { view: new DataView(raw.buffer, raw.byteOffset, raw.byteLength), base: 0 };
+  };
 
   const tileWidth = num(tags, 322);
   const tileLength = num(tags, 323);
@@ -300,28 +444,21 @@ function readPixels(buf, tags, little) {
         `tile count mismatch: expected ${expectedTiles} (${tilesAcross}x${tilesDown}), got ${tileOffsets.length}`
       );
     }
-    const pixelsPerTile = tileWidth * tileLength * samplesPerPixel;
     for (let ty = 0; ty < tilesDown; ty++) {
       for (let tx = 0; tx < tilesAcross; tx++) {
         const tileIdx = ty * tilesAcross + tx;
-        const byteOff = tileOffsets[tileIdx];
-        const byteCount = tileByteCounts[tileIdx];
-        if (byteCount < pixelsPerTile * bps) {
-          throw new Error(
-            `tile ${tileIdx} byte count ${byteCount} smaller than expected ${pixelsPerTile * bps} ` +
-            `(compressed tiles are not supported)`
-          );
-        }
+        const blk = block(tileOffsets[tileIdx], tileByteCounts[tileIdx],
+          tileWidth, tileLength, `tile ${tileIdx}`);
         const originRow = ty * tileLength;
         const originCol = tx * tileWidth;
         const rowsInTile = Math.min(tileLength, height - originRow);
         const colsInTile = Math.min(tileWidth, width - originCol);
         for (let r = 0; r < rowsInTile; r++) {
           const destRowBase = (originRow + r) * width + originCol;
-          const srcBase = byteOff + (r * tileWidth) * samplesPerPixel * bps;
+          const srcBase = blk.base + (r * tileWidth) * samplesPerPixel * bps;
           for (let c = 0; c < colsInTile; c++) {
             // band 0 only, matching dtm.py's "multi-band: take the first band"
-            out[destRowBase + c] = readSample(dv, srcBase + c * samplesPerPixel * bps, little);
+            out[destRowBase + c] = readSample(blk.view, srcBase + c * samplesPerPixel * bps, little);
           }
         }
       }
@@ -337,12 +474,12 @@ function readPixels(buf, tags, little) {
     let row = 0;
     for (let s = 0; s < stripOffsets.length; s++) {
       const rows = Math.min(rowsPerStrip, height - row);
-      const off = stripOffsets[s];
+      const blk = block(stripOffsets[s], stripByteCounts[s], width, rows, `strip ${s}`);
       for (let r = 0; r < rows; r++) {
         const destBase = (row + r) * width;
-        const srcBase = off + r * width * samplesPerPixel * bps;
+        const srcBase = blk.base + r * width * samplesPerPixel * bps;
         for (let c = 0; c < width; c++) {
-          out[destBase + c] = readSample(dv, srcBase + c * samplesPerPixel * bps, little);
+          out[destBase + c] = readSample(blk.view, srcBase + c * samplesPerPixel * bps, little);
         }
       }
       row += rows;

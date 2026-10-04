@@ -1490,6 +1490,129 @@ export async function runSuite(fetchTile) {
     }
   }
 
+  const X8 = "X8 · compressed rasters — Deflate, and the predictors that come with it";
+  {
+    /**
+     * ⚠️ EVERY FIXTURE HERE WAS WRITTEN BY GDAL, NOT BY THIS SUITE. A fixture
+     * built by applying the predictor with the same understanding the decoder
+     * uses would pass even if that understanding were wrong — the encoder's
+     * mistake would cancel the decoder's, and the row would prove only that the
+     * code agrees with itself. These are rasterio's bytes, and the expected
+     * numbers are the ones handed to it before it compressed them.
+     *
+     * The occasion: a student's 1 m DTM would not open on the live site.
+     * `COMPRESS=DEFLATE` is what GDAL writes by default in many workflows, and
+     * the reader handled uncompressed rasters only — so the tool told the user
+     * to run `gdal_translate`, which is a fine thing to say to someone who has
+     * GDAL and a useless thing to say to a student who has a browser.
+     */
+    const bytes = (b) => {
+      const bin = atob(b);
+      const u8 = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+      return u8.buffer;
+    };
+    /** 6x4, written by rasterio with EPSG:25833 and a 1 m cell. */
+    const F32 = [12.5, -3.25, 0, 1000.125, -0.5, 7.75, 100, 101.5, 102.25,
+      103.125, 104.0625, 105.03125, -40.5, -41.25, 0.0010000000474974513,
+      0.0020000000949949026, 55555.5, -99999.5, 0.10000000149011612,
+      0.20000000298023224, 0.30000001192092896, 0.4000000059604645, 0.5,
+      0.6000000238418579];
+    const U16 = [0, 1, 2, 65535, 32768, 7, 100, 200, 300, 400, 500, 600, 65534,
+      1, 65533, 2, 65532, 3, 9, 9, 9, 9, 9, 9];
+
+    const TIF_PRED3 =
+      "SUkqAAgAAAAQAAABAwABAAAABgAAAAEBAwABAAAABAAAAAIBAwABAAAAIAAAAAMBAwABAAAACAAAAAYBAwAB" +
+      "AAAAAQAAABEBBAABAAAAdAEAABUBAwABAAAAAQAAABYBAwABAAAABAAAABcBBAABAAAAXQAAABwBAwABAAAA" +
+      "AQAAAD0BAwABAAAAAwAAAFMBAwABAAAAAwAAAA6DDAADAAAAzgAAAIKEDAAGAAAA5gAAAK+HAwAgAAAAFgEA" +
+      "ALGHAgAeAAAAVgEAAAAAAAAAAAAAAADwPwAAAAAAAPA/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" +
+      "AAAAAAAAAABZQAAAAAAAAGlAAAAAAAAAAAABAAEAAAAHAAAEAAABAAEAAQQAAAEAAQACBLGHFgAAAAEIsYcH" +
+      "ABYABggAAAEAjiMADAAAAQDpZAQMAAABACkjRVRSUzg5IC8gVVRNIHpvbmUgMzNOfEVUUlM4OXwAeJxzrHdw" +
+      "qW7k4NhQ1faDg4GB4wcDBDiByTZmRiYmJj2GhgMPPnwAixxiqGDkaYhmjmsIy7JlEGL46LORIZ9B0MGWkYGB" +
+      "kaG3wdfYRHIzw1ljk5kmQNJ4FgBt/Rhb";
+    const TIF_PRED2 =
+      "SUkqAAgAAAAQAAABAwABAAAABgAAAAEBAwABAAAABAAAAAIBAwABAAAAEAAAAAMBAwABAAAACAAAAAYBAwAB" +
+      "AAAAAQAAABEBBAABAAAAdAEAABUBAwABAAAAAQAAABYBAwABAAAABAAAABcBBAABAAAAJgAAABwBAwABAAAA" +
+      "AQAAAD0BAwABAAAAAgAAAFMBAwABAAAAAQAAAA6DDAADAAAAzgAAAIKEDAAGAAAA5gAAAK+HAwAgAAAAFgEA" +
+      "ALGHAgAeAAAAVgEAAAAAAAAAAAAAAADwPwAAAAAAAPA/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" +
+      "AAAAAAAAAABZQAAAAAAAAGlAAAAAAAAAAAABAAEAAAAHAAAEAAABAAEAAQQAAAEAAQACBLGHFgAAAAEIsYcH" +
+      "ABYABggAAAEAjiMADAAAAQDpZAQMAAABACkjRVRSUzg5IC8gVVRNIHpvbmUgMzNOfEVUUlM4OXwAeJxjYGAE" +
+      "wr//GRvYG1IYEPDff2aGP/9ZGX79Z2fgZEAAADgdC2g=";
+    const TIF_PRED1 =
+      "SUkqAAgAAAAQAAABAwABAAAABgAAAAEBAwABAAAABAAAAAIBAwABAAAAIAAAAAMBAwABAAAACAAAAAYBAwAB" +
+      "AAAAAQAAABEBBAABAAAAdAEAABUBAwABAAAAAQAAABYBAwABAAAABAAAABcBBAABAAAAZAAAABwBAwABAAAA" +
+      "AQAAAD0BAwABAAAAAQAAAFMBAwABAAAAAwAAAA6DDAADAAAAzgAAAIKEDAAGAAAA5gAAAK+HAwAgAAAAFgEA" +
+      "ALGHAgAeAAAAVgEAAAAAAAAAAAAAAADwPwAAAAAAAPA/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" +
+      "AAAAAAAAAABZQAAAAAAAAGlAAAAAAAAAAAABAAEAAAAHAAAEAAABAAEAAQQAAAEAAQACBLGHFgAAAAEIsYcH" +
+      "ABYABggAAAEAjiMADAAAAQDpZAQMAAABACkjRVRSUzg5IC8gVVRNIHpvbmUgMzNOfEVUUlM4OXwAeJxjYPBw" +
+      "ZGAIOMAAAhxVLkByPwPDDwcGhhNODAynnRgazjgxOJxzYlC44MQgcAkopnSIgUH1UL5Qs1W+ELN1A3Ok+wH/" +
+      "w8fPnjlje/aMj92smTPtgGw7oDn2s2ZK2gMAu6AeYg==";
+    const TIF_LZW =
+      "SUkqAAgAAAAQAAABAwABAAAABgAAAAEBAwABAAAABAAAAAIBAwABAAAAIAAAAAMBAwABAAAABQAAAAYBAwAB" +
+      "AAAAAQAAABEBBAABAAAAdAEAABUBAwABAAAAAQAAABYBAwABAAAABAAAABcBBAABAAAAVwAAABwBAwABAAAA" +
+      "AQAAAD0BAwABAAAAAQAAAFMBAwABAAAAAwAAAA6DDAADAAAAzgAAAIKEDAAGAAAA5gAAAK+HAwAgAAAAFgEA" +
+      "ALGHAgAeAAAAVgEAAAAAAAAAAAAAAADwPwAAAAAAAPA/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" +
+      "AAAAAAAAAABZQAAAAAAAAGlAAAAAAAAAAAABAAEAAAAHAAAEAAABAAEAAQQAAAEAAQACBLGHFgAAAAEIsYcH" +
+      "ABYABggAAAEAjiMADAAAAQDpZAQMAAABACkjRVRSUzg5IC8gVVRNIHpvbmUgMzNOfEVUUlM4OXwAgAAABIIM" +
+      "CKDAgUJBB6IkJX8CfBAgTIIUCZcVQDMipAZ0VEDQioQaUVAAiYUCErCN4SQY6lYDHaAAZZI7AJ7DY7NZjMHs" +
+      "6Jg+TSZTI+nTMH0JH9BDI/gI";
+
+    /** How many of `want` the reader got exactly right. */
+    const exact = (dem, want) => {
+      let n = 0;
+      for (let i = 0; i < want.length; i++) if (dem.z[i] === want[i]) n++;
+      return n;
+    };
+
+    // ⚠️ PREDICTOR 3 IS THE ONE THAT FAILS SILENTLY. It is not a different
+    // compression — it is a byte-plane shuffle applied before compressing, so a
+    // reader that inflates correctly and ignores the predictor still produces a
+    // raster of the right SIZE full of plausible, wrong heights. There is no
+    // error to catch; only the numbers show it.
+    const p3 = loadGeoTIFF(bytes(TIF_PRED3), { name: "x8-p3" });
+    add(X8, "a Deflate raster with the FLOATING-POINT predictor (3) decodes to "
+      + "the exact float32 values GDAL was given — the predictor is a byte-plane "
+      + "shuffle, so ignoring it yields plausible wrong heights and no error",
+      `${F32.length} of ${F32.length} exact`,
+      `${exact(p3, F32)} of ${F32.length} exact`, exact(p3, F32) === F32.length);
+
+    const p2 = loadGeoTIFF(bytes(TIF_PRED2), { name: "x8-p2", classes: true });
+    add(X8, "…and with HORIZONTAL differencing (2) on an integer raster, "
+      + "including values that run to the top of a 16-bit sample",
+      `${U16.length} of ${U16.length} exact`,
+      `${exact(p2, U16)} of ${U16.length} exact`, exact(p2, U16) === U16.length);
+
+    const p1 = loadGeoTIFF(bytes(TIF_PRED1), { name: "x8-p1" });
+    add(X8, "…and Deflate with no predictor at all",
+      `${F32.length} of ${F32.length} exact`,
+      `${exact(p1, F32)} of ${F32.length} exact`, exact(p1, F32) === F32.length);
+
+    // ⚠️ THE ROW THAT CATCHES A PREDICTOR QUIETLY NOT BEING UNDONE. The same
+    // numbers, stored two different ways, must come back the same. If the
+    // shuffle were left in place this is the row that goes red.
+    let agree = 0;
+    for (let i = 0; i < F32.length; i++) if (p1.z[i] === p3.z[i]) agree++;
+    add(X8, "…and the SAME raster stored with and without the predictor decodes "
+      + "identically, which is what proves the shuffle was undone rather than "
+      + "merely survived",
+      `${F32.length} of ${F32.length} agree`, `${agree} of ${F32.length} agree`,
+      agree === F32.length);
+
+    // LZW is common in the wild and is a separate decoder, not a flag away. The
+    // reader must say so plainly instead of failing in the middle of a raster.
+    let lzwMsg = "(it decoded, which it should not have)";
+    let lzwOk = false;
+    try {
+      loadGeoTIFF(bytes(TIF_LZW), { name: "x8-lzw" });
+    } catch (e) {
+      lzwMsg = String(e.message);
+      lzwOk = /LZW/.test(lzwMsg) && /gdal_translate/.test(lzwMsg);
+    }
+    add(X8, "an LZW raster is refused BY NAME, with the command that converts "
+      + "it — an unsupported codec should end in a sentence, not in a wrong map",
+      "refused, names LZW and the fix", lzwOk ? "yes" : lzwMsg.slice(0, 60), lzwOk);
+  }
+
   const O = "O · substrate — the one layer that is not derived from elevation";
   {
     /**
