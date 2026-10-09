@@ -2417,9 +2417,22 @@
          by how much, which is the exact failure the removed label existed to
          prevent. A distortion nobody declares is worse than a distortion nobody
          can adjust. -->
-    <label class="field" id="view-ex-field" hidden>
-      <span>Vertical exaggeration <em id="ex-val">2.0×</em></span>
-      <input type="range" id="ex" min="1" max="8" step="0.5" value="2">
+    <!-- ⚠️⚠️ 1.0 BY DEFAULT, AND THE SLIDER IS BACK (Marc, 2026-10-09: "by
+         default it should be 1.0 — and then i can exaggerate if i want to").
+         He asked after seeing a steep student stripe drawn at a fixed 2.0×: a
+         true mean slope of 16° read as 30°, and nothing he could see said why.
+         A fixed factor suits the tile it was chosen on and overstates the next.
+         At 1.0 every tile is drawn true and two tiles compare by eye; the
+         exaggeration is a deliberate act, declared in the Display badge as well
+         as in the note below, so a closed menu still says it is in force. -->
+    <label class="field" id="view-ex-field">
+      <span>Vertical exaggeration <em id="ex-val">1.0×</em></span>
+      <input type="range" id="ex" min="1" max="8" step="0.5" value="1">
+      <!-- ⚠️ AUTO SUGGESTS, IT DOES NOT DECIDE. It is pressed, never applied on
+           load: a factor that changes per tile on its own is exactly what made
+           two tiles impossible to compare. -->
+      <button class="tog" id="ex-auto"
+        title="stretch just enough for THIS terrain's slopes to read — about 15° on average; never below 1×">auto</button>
     </label>
 
     <!-- ⚠️ ONE SUB PER REPRESENTATION (2026-08-16, Marc), each holding that

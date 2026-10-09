@@ -598,6 +598,17 @@ function badgeText(sec) {
       if (on("t-context")) parts.push("context");
       if (on("t-contours")) parts.push("contours");
       if (on("t-hud")) parts.push("instrument");
+      // ⚠️ AN EXAGGERATED VIEW SAYS SO ON THE CLOSED PANEL (Marc, 2026-10-09).
+      // The factor was declared in words since September — but inside Display ›
+      // Surface, a fold that starts shut, so the declaration the 2.0 was granted
+      // on was effectively invisible and he had to ask whether the ground was
+      // stretched. At 1.0 the badge stays quiet: drawn true is the default, and
+      // the note inside still says so for anyone who opens it.
+      {
+        const ex = parseFloat(/** @type {HTMLInputElement|null} */ (
+          document.getElementById("ex"))?.value ?? "1");
+        if (Number.isFinite(ex) && ex !== 1) parts.push(`${ex.toFixed(1)}× vertical`);
+      }
       break;
     }
     default:

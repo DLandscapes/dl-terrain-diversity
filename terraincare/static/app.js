@@ -1452,50 +1452,29 @@ async function adoptDEM(dem, name) {
   for (const v of dem.z) if (Number.isFinite(v)) { sum += v; n++; }
   state.datum = n ? sum / n : 0;
 
-  // A terrain patch is far wider than it is deep — 5.3 m of relief across 64 m
-  // on the Ørndalen patch, a ratio of 0.08 — so at 1:1 it renders as a plate no
-  // matter how it is lit. Pick a default exaggeration that brings the relief to
-  // a legible fraction of the width. Exaggeration is a CLAIM, not a free
-  // display choice, so the factor is always on screen (Morphos §5.7's rule for
-  // teaching-mode instruments).
-  const [zlo, zhi] = dem.zRange();
-  const ratio = (zhi - zlo) / (dem.ncols * dem.cell);
-  // ⚠️ PINNED AT 1.0 SINCE 2026-08-19, when the control was removed from the
-  // interface at Marc's request. The suggestion below is kept because it is the
-  // reasoning, not dead weight: a terrain patch is far wider than it is deep, so
-  // a legibility factor is a real want and this is the calculation for it. What
-  // it may not do is apply itself while nothing on screen declares it — the
-  // comment above states the rule, and an undeclared 4.5x on the opening tile
-  // would break it. Restore by returning `legible` instead of 1.
-  const legible = ratio > 0 ? Math.min(8, Math.max(1, Math.round((0.22 / ratio) * 2) / 2)) : 1;
-  void legible;
-  /**
-   * ⚠️⚠️ 2.0×, BY MARC'S DECISION (2026-09-02: "scale the default mesh z by 2",
-   * asked for so the contours read more clearly). THIS REVERSES THE PIN AT 1.0
-   * and the note that set it is worth quoting, because its argument is not the
-   * value — it is the declaration:
-   *
-   *   "Hiding the slider while `adoptDEM` went on auto-suggesting a factor —
-   *    4.5x on the opening tile — would have left the terrain silently
-   *    distorted with nothing on screen saying by how much … A distortion
-   *    nobody declares is worse than a distortion nobody can adjust."
-   *
-   * So the pin is lifted and the declaration is ADDED rather than left out:
-   * Display › Surface now states the factor in words on every tile load, and
-   * `syncExaggerationNote` keeps it true. A FIXED, STATED 2.0× is a different
-   * thing from an auto-suggested 4.5× nobody was told about.
-   *
-   * ⚠️ IT IS STILL NOT `legible`. The auto-suggestion above stays dead: a factor
-   * that changes per tile means two tiles cannot be compared by eye, which is
-   * the failure the pin was defending against and the reason `legible` is
-   * computed and thrown away rather than deleted.
-   *
-   * ⚠️ AND IT DOES NOT TOUCH THE DRAWINGS. `section.js` derives its own
-   * `drawnEx` from the geometry it draws and deliberately ignores this — see
-   * its note about a 1:100 sheet once printing "4.5×" because that was the
-   * 3-D view's factor. The sections stay honest at any view exaggeration.
-   */
-  const suggested = 2;
+  // ⚠️⚠️ EVERY TILE OPENS AT 1.0 — DRAWN TRUE (Marc, 2026-10-09: "by default
+  // it should be 1.0 — and then i can exaggerate if i want to"). This ends a
+  // run of reversals worth keeping straight:
+  //
+  //   until 2026-08-19  an auto factor applied itself per tile (4.5x on the
+  //                     opening tile), undeclared
+  //   2026-08-19        pinned at 1.0, the slider hidden
+  //   2026-09-02        a fixed, stated 2.0 at Marc's request, so contours read
+  //   2026-10-09        1.0 again, the slider back, and the factor in the badge
+  //
+  // The 2.0 was right for the tile it was chosen on and wrong for the next: a
+  // steep student stripe with a true mean slope of 16° drew at a visual 30°,
+  // and nothing on screen said why. A FIXED factor is still a per-tile choice
+  // in disguise. Resetting to 1.0 on every load is the one value that cannot
+  // overstate a tile it was not chosen for.
+  //
+  // ⚠️ THE OLD AUTO RULE IS GONE, NOT JUST UNUSED. It compared the relief with
+  // the tile's E-W WIDTH only, so the same terrain turned through 90° got a
+  // different factor — measured on stripe A of the course terrain: 1.0 as it
+  // lies, 1.5 turned through 90°. Its replacement, `legibleExaggeration`, works from the mean
+  // slope, which does not care which way the tile lies or how big it is, and
+  // it only ever runs when the auto button is pressed.
+  const suggested = 1;
   const exSlider = /** @type {HTMLInputElement} */ ($("ex"));
   exSlider.value = String(suggested);
   $("ex-val").textContent = `${suggested.toFixed(1)}×`;
@@ -3947,6 +3926,57 @@ view.onBrushResize = brushResize;
 view.onBrushStrength = brushStrength;
 $("strength").addEventListener("input", () => {
   $("strength-val").textContent = `${parseFloat(/** @type {HTMLInputElement} */ ($("strength")).value).toFixed(2)} m`;
+});
+
+/**
+ * The exaggeration that would let THIS terrain's slopes read — a suggestion,
+ * applied only when asked.
+ *
+ * ⚠️ FROM THE MEAN SLOPE, NOT FROM RELIEF OVER WIDTH. Slope is the thing a
+ * reader actually judges, and it does not change when a tile is turned or
+ * scaled; the rule it replaces measured relief against the E-W width only and
+ * gave a rotated tile a different answer. The aim is a mean slope that LOOKS
+ * about 15°: f = tan 15° / tan(mean), clamped to the slider's 1-8 and rounded
+ * to its 0.5 step. Measured on three tiles through the real reader and the
+ * Horn kernel, not estimated: the opening tile (mean 7.07°) comes out at 2.0 —
+ * the factor Marc chose for that tile by eye on 2 September; the Ørndalen fill
+ * patch (6.10°, agreeing with the 6.1° recorded independently in its
+ * SOURCE.txt) at 2.5; and stripe A of the LAR-3072 course terrain (21.98°) at
+ * 1.0, drawn true.
+ *
+ * ⚠️ THE 15° IS A DESIGN CHOICE, NOT A MEASUREMENT, and the button's tooltip
+ * says what it aims for so nobody mistakes it for a property of the terrain.
+ *
+ * ⚠️ IT USES THE SLOPE MEAN THE READOUT SHOWS — Horn 3x3, `slopeMeanDeg` — so
+ * the status line can explain the result with the number the reader can see.
+ * @param {number} meanDeg
+ */
+function legibleExaggeration(meanDeg) {
+  const TARGET = 15;
+  if (!(meanDeg > 0.5)) return { f: 1, flat: true, shown: meanDeg };
+  const t = Math.tan((meanDeg * Math.PI) / 180);
+  const raw = Math.tan((TARGET * Math.PI) / 180) / t;
+  const f = Math.min(8, Math.max(1, Math.round(raw * 2) / 2));
+  const shown = (Math.atan(f * t) * 180) / Math.PI;
+  return { f, flat: false, shown };
+}
+
+$("ex-auto").addEventListener("click", () => {
+  const mean = state.metrics?.slopeMeanDeg;
+  if (!Number.isFinite(mean)) {
+    status("the slope has not been measured yet — press auto again once the analysis has settled");
+    return;
+  }
+  const { f, flat, shown } = legibleExaggeration(mean);
+  const slider = /** @type {HTMLInputElement} */ ($("ex"));
+  slider.value = String(f);
+  slider.dispatchEvent(new Event("input", { bubbles: true }));
+  status(flat
+    ? `this ground is effectively flat (mean slope ${mean.toFixed(1)}°) — exaggeration would show nothing, so it stays at 1.0×`
+    : f === 1
+      ? `vertical 1.0× — this terrain's mean slope of ${mean.toFixed(1)}° already reads; drawn true`
+      : `vertical ${f.toFixed(1)}× — a mean slope of ${mean.toFixed(1)}° now LOOKS like ${shown.toFixed(0)}°. `
+        + `Measurements, sections and exports stay true`, 9000);
 });
 
 $("ex").addEventListener("input", () => {
