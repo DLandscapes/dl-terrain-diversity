@@ -48,14 +48,14 @@ keywords:
 license: Apache-2.0
 repository-code: "https://github.com/DLandscapes/dl-terrain-diversity"
 url: "https://digital-landscapes.com/"
-version: "0.13.0"
-date-released: "2026-10-04"
+version: "0.13.1"
+date-released: "2026-10-10"
 # ⚠️ THE VERSION DOI, RESERVED BEFORE THE DEPOSIT WAS PUBLISHED. That order is
 #    the whole point: reserving first meant this line could be committed and
 #    TAGGED, so the archive Zenodo keeps contains a citation file that knows
 #    its own identifier — rather than one describing a DOI minted after the
 #    fact, which is what the automatic GitHub integration would have produced.
-doi: "10.5281/zenodo.23132192"
+doi: "10.5281/zenodo.23282210"
 references:
   # ⚠️ THE METHOD'S OWN PRIOR PUBLICATION, AND THE DATE IS THE POINT. TDIM was
   # defined here, on Digital Landscapes' own site, on 23 April 2018 — under an
