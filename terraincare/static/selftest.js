@@ -38,6 +38,8 @@ import { fieldFromRGBA, generatedField, resampleField, signedDisplacement,
   PATTERN_MEASURED, proceduralField } from "./pattern.js";
 import { pondWater, absorbedDepth, INFILTRATION } from "./analysis/ponding.js";
 import { writeGeoTIFF } from "./export/geotiff-write.js";
+import { AnalysisClient } from "./analysis-client.js";
+import { createCore } from "./analysis-core.js";
 import { writeOBJ, writeVoxelOBJ } from "./export/obj.js";
 import { makeZip } from "./export/zip.js";
 import { scaleBarLength } from "./export/figure.js";
@@ -1687,6 +1689,108 @@ export async function runSuite(fetchTile) {
       + "19 × 19 m footprint is 722 m³ more material, not approximately",
       `${(footprint * 2).toFixed(1)} m³`, `${(v3 - v1).toFixed(1)} m³`,
       Math.abs((v3 - v1) - footprint * 2) < 1e-6);
+  }
+
+  const X11 = "X11 · the analysis when the browser will not run its worker";
+  {
+    /**
+     * 2026-10-28: one Chrome profile, on two PCs, would not start the analysis
+     * worker. Every shader stayed blank, the elevation legend read 0-1 m, and
+     * nothing on screen said why; the same Chrome with a fresh profile was
+     * fine. Marc: "it should work on chrome, firefox, and other standard
+     * browsers" — "also safari". The page now runs the same analysis-core.js
+     * itself when the worker will not start. These rows pin that path, because
+     * it is the one no ordinary session ever walks.
+     */
+    const N = 48;
+    const zz = new Float32Array(N * N);
+    for (let r = 0; r < N; r++) {
+      for (let c = 0; c < N; c++) {
+        zz[r * N + c] = 20 + 0.04 * r + 1.5 * Math.exp(-((r - 24) ** 2 + (c - 16) ** 2) / 40);
+      }
+    }
+    const mk = () => {
+      const d = new DEM(zz.slice(), N, N, 1, 500000, 7700000, "x11");
+      d.epsg = 25833;
+      return d;
+    };
+    /** every numeric metric, as one comparable string */
+    const numeric = (m) => JSON.stringify(Object.fromEntries(
+      Object.entries(m || {}).filter(([, v]) => typeof v === "number")));
+
+    // The reference: the core on its own, no host at all.
+    /** @type {any} */ let direct = null;
+    createCore((m) => { if (m.type === "result" && !direct) direct = m; })
+      .handle({ type: "init", z: zz.slice().buffer, nrows: N, ncols: N, cell: 1,
+        originX: 500000, originY: 7700000, name: "x11", epsg: 25833, seq: 1 });
+
+    /** A client, its first result, and where it ran. @param {any} opts */
+    const runClient = async (opts) => {
+      /** @type {(m: any) => void} */ let resolve = () => {};
+      const got = new Promise((r) => { resolve = r; });
+      const timer = setTimeout(() => resolve(null), 20000);
+      const client = new AnalysisClient(mk(), (m) => { clearTimeout(timer); resolve(m); },
+        () => {}, opts);
+      const m = await got;
+      const out = { mode: client.mode, reason: client.fallbackReason, m };
+      client.dispose();
+      return out;
+    };
+
+    const asked = await runClient({ inPage: true });
+    add(X11, "asked to run on the page (?analysis=page), the analysis does — and answers",
+      "mode page, a result", `mode ${asked.mode}, ${asked.m ? "a result" : "no result"}`,
+      asked.mode === "page" && !!asked.m);
+    add(X11, "…with every metric identical to the analysis core run on its own: the "
+      + "fallback is the same code in another place, not a second implementation",
+      direct ? `slope mean ${f4(direct.metrics.slopeMeanDeg)}°, all metrics equal` : "a direct result",
+      asked.m ? `slope mean ${f4(asked.m.metrics.slopeMeanDeg)}°, `
+        + (numeric(asked.m.metrics) === numeric(direct?.metrics) ? "all metrics equal" : "metrics DIFFER")
+        : "no result",
+      !!direct && !!asked.m && numeric(asked.m.metrics) === numeric(direct.metrics));
+
+    // A browser that will not even create a Worker — an extension, a policy, or
+    // (in Node) no Worker at all. Restored afterwards whatever happens.
+    const hadWorker = Object.prototype.hasOwnProperty.call(globalThis, "Worker");
+    const realWorker = /** @type {any} */ (globalThis).Worker;
+    /** @type {any} */ let refused = null;
+    try {
+      /** @type {any} */ (globalThis).Worker = function () { throw new Error("refused by X11"); };
+      refused = await runClient({});
+    } finally {
+      if (hadWorker) /** @type {any} */ (globalThis).Worker = realWorker;
+      else delete /** @type {any} */ (globalThis).Worker;
+    }
+    add(X11, "a browser that will not create a Worker still gets the whole analysis — "
+      + "on the page, identical, with the reason kept for the status line",
+      "mode page, same metrics, reason names the refusal",
+      `mode ${refused?.mode}, `
+        + (numeric(refused?.m?.metrics) === numeric(direct?.metrics) ? "same metrics" : "metrics DIFFER")
+        + `, reason "${refused?.reason}"`,
+      refused?.mode === "page" && !!refused?.m && /would not create/.test(refused?.reason || "")
+        && numeric(refused.m.metrics) === numeric(direct?.metrics));
+
+    // Two analyses on one page must not share ground. A worker per tile gave
+    // that for free (a new Worker is a new module); on the page the module is
+    // loaded once, so it is createCore's closure that keeps them apart.
+    {
+      /** @type {any[]} */ const outB = [];
+      const A = createCore(() => {});
+      const B = createCore((m) => outB.push(m));
+      const init = (core) => core.handle({ type: "init", z: zz.slice().buffer, nrows: N,
+        ncols: N, cell: 1, originX: 0, originY: 0, name: "s", epsg: null, seq: 1 });
+      init(A);
+      init(B);
+      const vals = new Float32Array(9).fill(99);
+      A.handle({ type: "patch", seq: 2, rect: { r0: 5, c0: 5, r1: 7, c1: 7 },
+        values: vals.buffer, wantPanels: false, heavy: false });
+      B.handle({ type: "grids", seq: 3 });
+      const g = outB.find((m) => m.type === "grids")?.grids?.elevation;
+      const i = 6 * N + 6;
+      add(X11, "two analyses on one page keep separate ground: raising a patch of one "
+        + "tile to 99 m leaves the other tile's elevation there untouched",
+        `${zz[i].toFixed(3)} m`, g ? `${g[i].toFixed(3)} m` : "no grid", !!g && g[i] === zz[i]);
+    }
   }
 
   const X9 = "X9 · a band of a layer — read it, then select exactly what was read";

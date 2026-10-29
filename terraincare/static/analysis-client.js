@@ -45,6 +45,27 @@ const SLOW_PASS_LEAVE_MS = 70;
 /** How many interactive passes the median is taken over. */
 const PASS_WINDOW = 5;
 
+// ⚠️⚠️ A WORKER THAT NEVER STARTS MUST NOT MEAN A TOOL THAT NEVER ANSWERS
+// (2026-10-28). One Chrome profile, on two PCs, ran the page but not its
+// worker: every shader stayed blank, the elevation legend read 0-1 m, and
+// nothing on screen said why. The same Chrome 156 with a fresh profile, Edge
+// and the built-in browser were all fine, so the cause sat in that profile
+// (an extension or a policy) — which is exactly why the tool cannot rely on
+// every visitor's browser starting a worker. Marc: "it should work on
+// chrome, firefox, and other standard browsers" — "also safari".
+//
+// So the worker must SAY it is alive (worker.js posts "ready" once its
+// modules have loaded). Until then messages are held; if the worker cannot
+// be created, fails before "ready", or stays silent for this long, the page
+// runs the very same analysis-core.js itself. Ten seconds is generous on
+// purpose: on a slow connection the worker has a dozen modules to fetch, and
+// falling back too early would put a healthy machine's analysis on the
+// render thread for nothing.
+const WORKER_READY_MS = 10000;
+
+/** @param {any} e */
+const errText = (e) => (e && e.message) || String(e);
+
 export class AnalysisClient {
   /**
    * @param {import("./dem.js").DEM} dem
@@ -54,35 +75,23 @@ export class AnalysisClient {
    * @param {import("./dem.js").DEM} dem
    * @param {(result: any) => void} onResult
    * @param {(err: string) => void} [onError]
+   * @param {{inPage?: boolean}} [opts] inPage = skip the worker and run on the page
    */
-  constructor(dem, onResult, onError) {
+  constructor(dem, onResult, onError, opts = {}) {
     this.dem = dem;
     this.onResult = onResult;
     this.onError = onError;
-    this.worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
-    this.worker.onmessage = (e) => this._onMessage(e.data);
-
-    // A worker that throws during import or in a handler is otherwise COMPLETELY
-    // SILENT: the page keeps running, the panels simply never update, and there
-    // is nothing in the console. That cost real debugging time on this file
-    // (`gradient.aspect` instead of `gradient.aspectDeg` — undefined index read).
-    // Never leave a worker without these two handlers.
-    this.worker.onerror = (e) => {
-      this.inFlight = false;
-      const where = e.filename ? ` @ ${e.filename.split("/").pop()}:${e.lineno}` : "";
-      const msg = `worker error: ${e.message || "unknown"}${where}`;
-      console.error(msg, e);
-      this.lastError = msg;
-      if (this.onError) this.onError(msg);
-    };
-    this.worker.onmessageerror = () => {
-      this.inFlight = false;
-      const msg = "worker could not deserialise a message";
-      console.error(msg);
-      this.lastError = msg;
-      if (this.onError) this.onError(msg);
-    };
     this.lastError = null;
+    /** "starting" until a host says it is alive; then "worker" or "page"; "failed" if neither */
+    this.mode = "starting";
+    /** why the page runs the analysis itself, when it does */
+    /** @type {string|null} */ this.fallbackReason = null;
+    /** messages held until a host is alive, in order, with their transfer lists */
+    /** @type {Array<[any, Transferable[]]>} */ this._outbox = [];
+    /** called once if the analysis moves to the page: (mode, reason) */
+    /** @type {((mode: string, reason: string) => void) | null} */ this.onModeChange = null;
+    if (opts.inPage) this._fallBack("the page was asked to (?analysis=page)");
+    else this._startWorker();
 
     this.seq = 0;
     this.inFlight = false;
@@ -99,7 +108,7 @@ export class AnalysisClient {
     /** did the last dispatched pass ask for panels? see _flush() */
     this.lastGavePanels = true;
 
-    this.worker.postMessage({
+    this._send({
       type: "init",
       z: dem.z.slice().buffer,
       nrows: dem.nrows, ncols: dem.ncols, cell: dem.cell,
@@ -145,7 +154,7 @@ export class AnalysisClient {
     // A settle requested before the reset refers to a surface that no longer
     // exists; the reset pass below recomputes the heavy layers itself.
     this.pendingHeavy = false;
-    this.worker.postMessage({ type: "reset", seq: ++this.seq });
+    this._send({ type: "reset", seq: ++this.seq });
     this.inFlight = true;
   }
 
@@ -177,7 +186,7 @@ export class AnalysisClient {
     // makes them current again.
     this.lastGavePanels = wantPanels;
 
-    this.worker.postMessage(
+    this._send(
       { type: "patch", seq: ++this.seq, rect, values: vals.buffer, wantPanels, heavy },
       [vals.buffer],
     );
@@ -197,7 +206,7 @@ export class AnalysisClient {
     this._view = v;
     if (this._viewInFlight) { this._viewPending = true; return; }
     this._viewInFlight = true;
-    this.worker.postMessage({ type: "view", seq: ++this.seq, ...v });
+    this._send({ type: "view", seq: ++this.seq, ...v });
   }
 
   /**
@@ -206,7 +215,7 @@ export class AnalysisClient {
    * @param {number[]} period
    */
   setSolarPeriod(period) {
-    this.worker.postMessage({ type: "solar", seq: ++this.seq, period });
+    this._send({ type: "solar", seq: ++this.seq, period });
     this.inFlight = true;
   }
 
@@ -225,7 +234,7 @@ export class AnalysisClient {
   setSubstrate(codes) {
     if (this.disposed) return;
     const copy = codes ? codes.slice() : null;
-    this.worker.postMessage(
+    this._send(
       { type: "substrate", seq: ++this.seq, codes: copy ? copy.buffer : null },
       copy ? [copy.buffer] : []);
   }
@@ -251,7 +260,7 @@ export class AnalysisClient {
       }, 10000);
       if (!this._gridsPending) this._gridsPending = [];
       this._gridsPending.push({ resolve, timer });
-      this.worker.postMessage({ type: "grids", seq: ++this.seq });
+      this._send({ type: "grids", seq: ++this.seq });
     });
   }
 
@@ -312,8 +321,154 @@ export class AnalysisClient {
 
   dispose() {
     this.disposed = true;
-    this.worker.terminate();
+    clearTimeout(this._readyTimer);
+    if (this.worker) this.worker.terminate();
   }
+
+  /**
+   * Send to whichever host is running — or hold the message until one is.
+   * @param {any} msg @param {Transferable[]} [transfer]
+   */
+  _send(msg, transfer = []) {
+    if (this.mode === "worker" || this.mode === "page") this.worker.postMessage(msg, transfer);
+    else if (this.mode === "starting") this._outbox.push([msg, transfer]);
+    // "failed": nothing can answer; the error is already on screen.
+  }
+
+  /** The normal route: the analysis in a module worker, off the render thread. */
+  _startWorker() {
+    let w;
+    try {
+      w = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
+    } catch (err) {
+      this._fallBack(`the browser would not create it (${errText(err)})`);
+      return;
+    }
+    this.worker = w;
+    w.onmessage = (e) => {
+      if (this.mode === "starting") {
+        if (e.data && e.data.type === "ready") this._adopt("worker");
+        return;
+      }
+      this._onMessage(e.data);
+    };
+
+    // A worker that throws during import or in a handler is otherwise COMPLETELY
+    // SILENT: the page keeps running, the panels simply never update, and there
+    // is nothing in the console. That cost real debugging time on this file
+    // (`gradient.aspect` instead of `gradient.aspectDeg` — undefined index read).
+    // Never leave a worker without these two handlers.
+    //
+    // ⚠️ BEFORE "ready" AN ERROR MEANS THE WORKER NEVER STARTED — a script it
+    // needs was blocked or would not load — and that is the one case the page
+    // can rescue by running the analysis itself. AFTER "ready" an error is a
+    // fault in the analysis, which the page would hit too, so it is reported.
+    w.onerror = (e) => {
+      if (this.mode === "starting") {
+        if (e.preventDefault) e.preventDefault();
+        this._fallBack(`it did not start (${e.message || "the browser gave no reason"})`);
+        return;
+      }
+      this._fail(`worker error: ${e.message || "unknown"}${e.filename ? ` @ ${e.filename.split("/").pop()}:${e.lineno}` : ""}`, e);
+    };
+    w.onmessageerror = () => this._fail("worker could not deserialise a message");
+
+    this._readyTimer = setTimeout(() => {
+      if (this.mode === "starting") this._fallBack(`it did not answer within ${WORKER_READY_MS / 1000} s`);
+    }, WORKER_READY_MS);
+  }
+
+  /**
+   * A host said it is alive: hand it everything held, in order.
+   * @param {"worker"|"page"} mode
+   */
+  _adopt(mode) {
+    clearTimeout(this._readyTimer);
+    this.mode = mode;
+    const held = this._outbox;
+    this._outbox = [];
+    for (const [msg, transfer] of held) this.worker.postMessage(msg, transfer);
+  }
+
+  /**
+   * The worker is not coming: run the same analysis on the page.
+   *
+   * ⚠️ THE SAME CODE, NOT A SECOND IMPLEMENTATION. analysis-core.js is what the
+   * worker runs; here it runs on the render thread instead. The numbers are
+   * identical; only the hand pays, because a pass now shares the thread with
+   * the drawing — which is why the status line says so rather than hiding it.
+   * @param {string} reason
+   */
+  async _fallBack(reason) {
+    if (this.mode !== "starting" || this._fallingBack) return;
+    this._fallingBack = true;
+    clearTimeout(this._readyTimer);
+    if (this.worker) { try { this.worker.terminate(); } catch { /* already gone */ } }
+    this.worker = null;
+    this.fallbackReason = reason;
+    console.warn(`analysis: the background worker is not available — ${reason}. Running it on the page instead.`);
+    let core;
+    try {
+      core = await import("./analysis-core.js");
+    } catch (err) {
+      // Not even the page could load the analysis: say so plainly, because a
+      // blank map otherwise reads as "this terrain has nothing in it".
+      this.mode = "failed";
+      this._fail(`the analysis scripts would not load in this browser (${errText(err)})`, err);
+      return;
+    }
+    if (this.disposed) return;
+    this.worker = new InPageAnalysis(core.createCore,
+      (m) => this._onMessage(m),
+      (msg, err) => this._fail(msg, err));
+    this._adopt("page");
+    if (this.onModeChange) this.onModeChange("page", reason);
+  }
+
+  /** @param {string} msg @param {any} [err] */
+  _fail(msg, err) {
+    this.inFlight = false;
+    console.error(msg, err ?? "");
+    this.lastError = msg;
+    if (this.onError) this.onError(msg);
+  }
+}
+
+/**
+ * The analysis on the page, wearing a worker's interface.
+ *
+ * ⚠️ IT KEEPS postMessage'S CONTRACT EXACTLY, because the code on both sides was
+ * written against it: each side receives its OWN copy (structuredClone), and a
+ * transferred buffer LEAVES the sender. Handing objects across by reference
+ * instead would let the core's next pass overwrite a panel the page is still
+ * drawing — a bug that could only ever appear in this fallback, which is the
+ * path nobody tests by accident. Delivery is asynchronous for the same reason.
+ */
+class InPageAnalysis {
+  /**
+   * @param {(post: (msg: any, transfer?: Transferable[]) => void) => {handle: (m: any) => void}} createCore
+   * @param {(m: any) => void} deliver
+   * @param {(msg: string, err?: any) => void} fail
+   */
+  constructor(createCore, deliver, fail) {
+    this.closed = false;
+    this.fail = fail;
+    this.core = createCore((msg, transfer = []) => {
+      const copy = structuredClone(msg, { transfer });
+      setTimeout(() => { if (!this.closed) deliver(copy); }, 0);
+    });
+  }
+
+  /** @param {any} msg @param {Transferable[]} [transfer] */
+  postMessage(msg, transfer = []) {
+    const copy = structuredClone(msg, { transfer });
+    setTimeout(() => {
+      if (this.closed) return;
+      try { this.core.handle(copy); } catch (err) { this.fail(`analysis error: ${errText(err)}`, err); }
+    }, 0);
+  }
+
+  terminate() { this.closed = true; }
 }
 
 /** @param {any} a @param {any} b */

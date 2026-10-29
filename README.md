@@ -29,6 +29,14 @@ Then open <http://localhost:8994>. That is the whole setup. The launcher is a
 static file server with cache headers and a `/data/` mount; any static server
 will do, which is why this can also simply be hosted.
 
+It runs in the three browser engines: tested in Chrome 156, Firefox 151 and
+WebKit 26.5 (the engine Safari uses, run through Playwright on Windows; Safari
+itself on a Mac has not yet been checked), with the same self-test results in
+each. The analysis normally runs in a background worker. If a browser will not
+start it (an extension or a browser policy can prevent that), the page runs the
+same analysis itself and says so in the status line; add `?analysis=page` to the
+address to run it that way on purpose.
+
 Terrain is read from GeoTIFF: uncompressed or **Deflate**, tiled or stripped, 8/16/32-bit integer and 32/64-bit float, with the horizontal and floating-point predictors undone. LZW is not implemented and says so by name.
 
 It opens on a **synthetic flat plane**, not on survey data — see
@@ -37,7 +45,7 @@ It opens on a **synthetic flat plane**, not on survey data — see
 ## Test it
 
 ```bash
-node terraincare/static/_selftest.mjs     # 652 checks, headless
+node terraincare/static/_selftest.mjs     # 656 checks, headless
 ```
 
 The render suite is browser-only because it asserts on pixels and on the
@@ -55,7 +63,7 @@ identically in Node and in the browser, over the same modules the app loads.
 > exported sheets state a scale they are not drawn at. The rows were written to
 > fail against that named defect and stay red until the exporters are fixed — a
 > suite made green by loosening its own checks proves nothing, and the defect is
-> in the sheets, not in the test. The remaining **644 of 652 pass**, as do **165
+> in the sheets, not in the test. The remaining **648 of 656 pass**, as do **165
 > of 165** in the render suite. The scale *bars* on those sheets are already
 > correct; it is the printed ratio that overstates.
 

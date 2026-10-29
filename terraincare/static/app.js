@@ -1510,9 +1510,23 @@ async function adoptDEM(dem, name) {
     // Surface it loudly: a dead worker means the hydrology panels are frozen,
     // which is easy to mistake for "the terrain has no water in it".
     status(`Analysis unavailable — ${msg}`, 0);
-    $("status-foot").textContent = "worker failed";
+    $("status-foot").textContent = "analysis failed";
+  }, {
+    // ⚠️ ?analysis=page runs the analysis on the page from the start — the
+    // fallback a browser that blocks the worker gets anyway, made reachable on
+    // purpose so it can be tested in any browser without breaking one first.
+    inPage: new URLSearchParams(location.search).get("analysis") === "page",
   });
   state.analysis.onRecolour = onRecolour;
+  // ⚠️ SAID, NOT HIDDEN (2026-10-28). When the browser will not start the
+  // background worker the page runs the same analysis itself: the numbers are
+  // identical, but a pass now shares the thread with the drawing, so editing can
+  // feel heavier. The reader is told once, and the footer keeps saying it.
+  state.analysis.onModeChange = (_mode, reason) => {
+    status("Analysis is running on the page: this browser did not start the background "
+      + `worker (${reason}) — often an extension or a browser policy. The results are `
+      + "the same; editing may feel slower.", 12000);
+  };
 
   const [lo, hi] = dem.zRange();
   // (The scene card this used to fill moved into the readout's title card —
@@ -1877,7 +1891,8 @@ function onAnalysis(m) {
   // The overlay is a picture of the settled measurements, so it repaints when
   // they arrive and at no other time.
   scheduleInstrument();
-  $("status-foot").textContent = `worker ${m.ms.toFixed(0)} ms`;
+  $("status-foot").textContent =
+    `${state.analysis?.mode === "page" ? "on page" : "worker"} ${m.ms.toFixed(0)} ms`;
 }
 
 /**
